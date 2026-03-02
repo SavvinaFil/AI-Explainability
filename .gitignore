@@ -1,0 +1,2 @@
+# Ignore the multi-output classification examples
+examples/tabular/multioutput_classify/

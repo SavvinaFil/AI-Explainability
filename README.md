@@ -28,7 +28,7 @@ In the energy sector, knowing *that* a model predicted a price spike or a solar 
 
 To run this project, we recommend using [Conda](https://docs.anaconda.com/free/anaconda/install/index.html) to manage your dependencies and avoid version conflicts.
 
-### 1. Create the Environment
+### Create the Environment
 First, clone the repository and navigate into the folder. Then, create the `shap_aie` environment:
 
 ```bash
@@ -120,7 +120,6 @@ For detailed guides and tutorials, refer to our documentation suite:
 
 * **[Tutorial: LSTM Time-Series Analysis](./docs/tutorials/timeseries/lstm.md):** A step-by-step guide to training and explaining Long Short-Term Memory networks for temporal data.
 * **[Tutorial: Random Forest Binary Classification](./docs/tutorials/tabular/dc_binary_classify.md):** A comprehensive walkthrough for training and interpreting a binary classification model.
-* **[Tutorial: Multi-Output Random Forest Classification](./docs/tutorials/tabular/dc_multioutput_classify.md):** A specialized guide for handling multi-target classification tasks and analyzing joint feature importance.
 * **[Tutorial: Random Forest Regression](./docs/tutorials/tabular/dc_multioutput_regress.md):** A deep dive into training regression models and decoding the drivers behind continuous predictions.
 * **[Configuration Guide](./docs/configuration.md):** A complete technical breakdown of all `config.yaml` parameters and environment settings.
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
