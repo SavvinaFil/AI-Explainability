@@ -11,7 +11,7 @@
 
   "output_dir": "output/",
   "save_excel": false,
-  "generate_notebook": true,
+  "generate_notebook": false,
 
   "dataset_scope": "whole",
 

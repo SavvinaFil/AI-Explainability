@@ -9,8 +9,8 @@
   "dataset_scope": "subset",
   "subset_end": 200,
   
-  "save_excel": true,
-  "generate_notebook": true,
+  "save_excel": false,
+  "generate_notebook": false,
   
   "feature_names": [
     "Age", 

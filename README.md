@@ -1,6 +1,6 @@
 # 🛡️ AI Explainability Analysis Toolbox
 
-Neural Networks excel at navigating the complexities of the energy transition, but their decisions often remain "black boxes." This toolbox strips away the mystery by providing a standardized, model-agnostic framework for AI explainability using SHAP. It transforms complex model behavior into auditable, physically grounded insights—ensuring that when an AI makes a high-stakes decision, you can trace it back to the fundamental drivers of the energy system.
+Neural Networks excel at navigating the complexities of the energy transition, but their decisions often remain "black boxes." This toolbox strips away the mystery by providing a standardized, model-agnostic framework for AI explainability using SHAP. It transforms complex model behavior into physically grounded insights—ensuring that when an AI makes a high-stakes decision, you can trace it back to the fundamental drivers of the energy system.
 
 ---
 
@@ -19,12 +19,30 @@ In the energy sector, knowing *that* a model predicted a price spike or a solar 
 * **Model Debugging:** Diagnosing **systemic biases** or data leakage by identifying overpowering features.
 * **Regulatory & Market Compliance:** Establishing a clear **audit trail** for automated decisions.
 
-> **Key Takeaway:** While traditional "Feature Importance" tells you what the model values across the entire dataset, **SHAP tells you why the model made a specific decision right now.**
+> [!IMPORTANT]
+> While traditional "Feature Importance" tells you what the model values across the entire dataset, **SHAP tells you why the model made a specific decision right now.**
 
 ---
 
+## 🛠️ Installation & Setup
+
+To run this project, we recommend using [Conda](https://docs.anaconda.com/free/anaconda/install/index.html) to manage your dependencies and avoid version conflicts.
+
+### 1. Create the Environment
+First, clone the repository and navigate into the folder. Then, create the `shap_aie` environment:
+
+```bash
+# Option A: Using the environment.yml (Recommended for Conda users)
+conda env create -f environment.yml
+
+# Option B: Manual creation
+conda create -n shap_aie python=3.10 -y
+conda activate shap_aie
+```
 
 ## ⚡ Quickstart
+
+To get started using this toolbox, please follow the following steps:
 
 ### 1. Prepare your Assets
 Place your trained model and the dataset you want to explain in the `source/` directory:
@@ -82,7 +100,7 @@ python main.py --config examples/tabular/multioutput_regress/config.json
 The toolbox generates two primary artifacts in the output/ folder:
 
 1. SHAP Audit (.xlsx): A multi-sheet spreadsheet containing original feature values, model predictions, and SHAP values for every row. Each target index gets its own sheet.
-2. Interpretation Report (.ipynb): A fully executed Jupyter Notebook containing Summary Plots, Feature Importance Bar Charts, and Temporal Analysis (for LSTMs).
+2. Interpretation Report (.ipynb): A fully executed Jupyter Notebook containing various insightfull plots and a temporal analysis (for LSTMs).
 
 You can find examples of the jupyter notebooks here:
 

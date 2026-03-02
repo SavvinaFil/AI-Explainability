@@ -10,7 +10,6 @@ To ensure the toolbox operates correctly, your directory structure should mirror
 **Recommended Structure:**
 ```text
 project_root/
-├── energy_forecasting_dataset.csv  # Raw Data
 ├── source/
 │   ├── models/
 │   │   └── lstm_model.pth          # Trained Model
@@ -53,8 +52,8 @@ For `explainer_type: "kernel"`, the background data is **mandatory**.
 
 ---
 
-### Best Practices for Selecting Background Data
-1. **Size:** 100–500 samples is usually the "sweet spot" between accuracy and computation time.
+### Tips Selecting Background Data
+1. **Size:** Select a sufficient amount of samples to fully represent your data, but not too many to keep low computational time. 
 2. **Diversity:** Use a **K-Means summarized** version of your training set rather than the first 100 rows to ensure you capture the full range of variability.
 3. **Consistency:** The background data must have the exact same `normalization` and `look_back` windowing as your `test_data`.
 
