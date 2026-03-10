@@ -3,13 +3,14 @@
 To ensure the toolbox operates correctly, your directory structure should mirror the paths defined in your `config.json`. 
 
 ### 1. Storage & Paths
-* **Model Storage (`model_path`)**: Your trained model (e.g. PyTorch weights (`.pth`), or trained sklearn model) should be stored in `source/models/`. This allows the explainer to reload the architecture and weights before performing the analysis.
+* **Model Storage (`model_path`)**: Your trained PyTorch weights (`.pth`) should be stored in `source/models/`. This allows the explainer to reload the architecture and weights before performing the analysis.
 * **Data (`background_data_path` & `test_data_path`)**: Storing these as pre-processed subsets (separate from the raw dataset) ensures that the explainer uses the exact same normalization and windowing as your training pipeline.
 * **Output Directory (`output_dir`)**: All generated SHAP plots, summary statistics, and optional reports will be saved here.
 
 **Recommended Structure:**
 ```text
 project_root/
+├── energy_forecasting_dataset.csv  # Raw Data
 ├── source/
 │   ├── models/
 │   │   └── lstm_model.pth          # Trained Model
@@ -20,6 +21,8 @@ project_root/
 ```
 ---
 
+---
+
 ## 🧪 Background vs. Test Data
 
 In SHAP analysis, there is a critical distinction between the **Background Data** and the **Data to Explain**.
@@ -27,11 +30,11 @@ In SHAP analysis, there is a critical distinction between the **Background Data*
 ### Background Data (`background_data_path`)
 * **What it is:** A representative subset of your training data.
 * **What it’s used for:** SHAP explains predictions by comparing the current input to a "baseline." The background data calculates this baseline by "integrating out" features—effectively replacing a feature with values from the background set to measure the impact on the prediction.
-* **Why it matters:** It defines the Base Value ($\phi_0$). If the background set is biased or contains outliers, the resulting Shapley values will be skewed. A well-chosen background set ensures that the "contributions" identified are relative to a truly "typical" state of the system.
+* **Why it matters:** In energy forecasting, your background data must represent "typical" behavior. If your background set lacks diversity (e.g., only includes nighttime samples), your daytime explanations will be physically nonsensical.
 
 ### Data to Explain (`test_data_path`)
-* **What it is:** The specific input instances (observations) you wish to deconstruct.
-* **What it’s used for:** These are the targets for "local" explanations. The explainer deconstructs the model's output for these specific samples, assigning a numeric value (the SHAP value) to each feature. This value represents how much that feature pushed the prediction higher or lower compared to the background average.
+* **What it is:** The specific samples (e.g., a high-demand day or a sudden solar drop) that you want to analyze.
+* **What it’s used for:** This is the input that the explainer deconstructs to show which features (like `ghi` or `PV_lag_24`) were the primary drivers for that specific forecast.
 
 ---
 
@@ -52,9 +55,9 @@ For `explainer_type: "kernel"`, the background data is **mandatory**.
 
 ---
 
-### Tips Selecting Background Data
-1. **Size:** Select a sufficient amount of samples to fully represent your data, but not too many to keep low computational time. 
-2. **Diversity:** Use a **K-Means summarized** version of your training set rather than the first 100 rows to ensure you capture the full range of variability.
+### Best Practices for Selecting Background Data
+1. **Size:** 100–500 samples is usually the "sweet spot" between accuracy and computation time.
+2. **Diversity:** Use a **K-Means summarized** version of your training set rather than the first 100 rows to ensure you capture the full range of solar/wind variability.
 3. **Consistency:** The background data must have the exact same `normalization` and `look_back` windowing as your `test_data`.
 
 ---
@@ -65,6 +68,8 @@ For `explainer_type: "kernel"`, the background data is **mandatory**.
 | :--- | :--- |
 | `analysis` | The class of problem, such as `timeseries` for forecasting with LSTMs. |
 | `explainer_type` | Specifies the algorithm (e.g., `gradient` for NNs, `tree` for Random Forest, `kernel` for black-box). |
+| `look_back` | The temporal horizon; e.g., `6` means the explainer audits the 6 previous time steps. |
+| `input_dim` | The number of features per time step. |
 | `dataset_scope` | Usually set to `whole` to ensure scaling context is maintained across the entire project. |
 | `generate_notebook` | If `true`, exports a `.ipynb` file for interactive post-run analysis. |
 

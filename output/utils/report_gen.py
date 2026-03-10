@@ -2,6 +2,11 @@ import nbformat as nbf
 from nbconvert.preprocessors import ExecutePreprocessor
 import os
 import numpy as np
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_path=None, all_shap_values=None):
     output_dir = os.path.dirname(output_path)
@@ -46,25 +51,31 @@ This notebook provides a post-hoc explanation of the model's predictions using *
 
 ---
 
-### 🔍 What are SHAP Values?
+###  What are SHAP Values?
 **SHAP (SHapley Additive exPlanations)** decomposes a model's prediction into the contribution of each individual feature. 
 * **Magnitude:** A larger absolute SHAP value means the feature had a bigger impact on the output.
 * **Direction:** A positive SHAP value means the feature pushed the prediction *higher*, while a negative value pushed it *lower*.
 * **Interpretation:** For any given sample, the sum of SHAP values plus the base value (average model output) equals the actual model prediction.
 
-### 🧪 Methodology
+###  Methodology
 {explainer_desc}
 
 ---
 
-### 📋 Metadata
+###  Metadata
 **Model Architecture:** {model_type}  
 **Analysis Context:** {config.get("analysis", "General Interpretation")}  
 **Dataset Scope:** {config.get("dataset_scope", "N/A")}
 
 ---
 """
+    # !!!cells = [nbf.v4.new_markdown_cell(text_intro)]
     cells = [nbf.v4.new_markdown_cell(text_intro)]
+    cells.append(nbf.v4.new_code_cell("""
+    import asyncio, sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    """))
 
     # --- 3. Setup Code (Handles Single or Multi-Target) ---
     # If all_shap_values is provided, we use it. Otherwise, we wrap shap_values in a dict.

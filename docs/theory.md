@@ -14,20 +14,6 @@ $$\phi_i(v) = \sum_{S \subseteq N \setminus \{i\}} \frac{|S|!(n - |S| - 1)!}{n!}
 * **$v(S \cup \{i\}) - v(S)$**: The **marginal contribution**—how much the prediction changes when feature $i$ is added to the coalition.
 * **$\frac{|S|!(n - |S| - 1)!}{n!}$**: The **weighting factor**, representing the probability of the coalition $S$ occurring across all possible permutations.
 
-### The Additive Property (Efficiency)
-The most significant feature of SHAP is that it satisfies the **Efficiency Axiom**, which states that the sum of the feature attributions must exactly match the difference between the model's output and the base value. 
-
-For a specific input $x$, the model's output $f(x)$ is decomposed as:
-
-$$f(x) = \phi_0 + \sum_{i=1}^{n} \phi_i$$
-
-**Where:**
-* **$f(x)$**: The actual prediction made by the model for that specific instance.
-* **$\phi_0$**: The **Base Value** (Expected Value). This represents the average output of the model across the **Background Data**. It is the "starting point" of every explanation.
-* **$\phi_i$**: The **SHAP value** for feature $i$. 
-
-> **Intuition:** If the model predicts a value higher than the average, the sum of the SHAP values will be positive. If the prediction is lower than average, the sum will be negative. This provides a literal mathematical breakdown: "The average prediction is 50, but because the Temperature is high (+10) and the Humidity is low (-5), the final prediction is 55."
-
 ---
 
 ### How are they computed?

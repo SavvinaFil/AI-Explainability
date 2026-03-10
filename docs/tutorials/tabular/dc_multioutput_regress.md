@@ -198,6 +198,14 @@ all results with inline plots.
 Once your model and dataset are stored in `source/` and your `config.json` is in 
 place, trigger the full explainability pipeline with a single command.
 
+Copy the configuration to the project root:
+
+```bash
+cp examples/tabular/multioutput_regress/config.json config.json
+```
+
+Then run the analysis from the project root:
+
 ```bash
 python main.py --config examples/tabular/multioutput_regress/config.json
 ```

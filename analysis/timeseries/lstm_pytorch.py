@@ -26,28 +26,31 @@ class LSTMExplainer(TimeseriesExplainerBase):
     
     def load_model(self):
         
-        """Dynamically reconstructs the model by inferring dimensions from state_dict."""
-        model_full_path = self.get_path("model_path")
-        state_dict = torch.load(model_full_path, map_location=torch.device('cpu'))
-
-        # 1. Infer Architecture from state_dict keys
-        # LSTM weight_ih_l0 shape is [4*hidden_dim, input_dim]
-        four_hidden_dim, inferred_input_dim = state_dict['lstm.weight_ih_l0'].shape
-        inferred_hidden_dim = four_hidden_dim // 4
-
-        # 2. Store inferred values (replacing config lookups)
-        self.input_dim = inferred_input_dim
-        self.hidden_dim = inferred_hidden_dim
+        """Reconstructs the model from state_dict for better stability."""
+        # 1. Get parameters from config
+        self.input_dim = self.config.get("input_dim", 12)
+        self.hidden_dim = self.config.get("hidden_size", 16)
+        self.model_type = self.config.get("model_type", "lstm")
+        self.output_dim = 1
+        self.output_labels = self.config.get("output_labels", 0)
         
-        # 3. Reconstruct the Skeleton using inferred dims
+        # 2. Reconstruct the 'Skeleton' (Architecture)
+        # This works because the class LSTMForecaster is defined in this same file
         self.model = LSTMForecaster(input_dim=self.input_dim, hidden_dim=self.hidden_dim)
         
-        # 4. Load weights
-        self.model.load_state_dict(state_dict)
-        self.model.eval()
-        torch.set_grad_enabled(True)
+        # 3. Load the 'Muscles' (Weights)
+        model_full_path = self.get_path("model_path")
         
-        print(f"Model loaded: Inferred Input Dim={self.input_dim}, Hidden Dim={self.hidden_dim}")
+        # Load the weights (state_dict)
+        state_dict = torch.load(model_full_path, map_location=torch.device('cpu'))
+        
+        # Apply weights to the skeleton
+        self.model.load_state_dict(state_dict)
+        
+        # 4. Set to evaluation mode
+        self.model.eval()
+        torch.set_grad_enabled(True) 
+        print("Model state_dict loaded successfully.")
 
     def explain(self):
         """Agnostic explanation: Uses pre-processed tensors."""
@@ -57,9 +60,6 @@ class LSTMExplainer(TimeseriesExplainerBase):
         
         background = torch.load(bg_path)
         test_data = torch.load(test_path)
-        
-        self.look_back = test_data.shape[1]
-        self.config["look_back"] = self.look_back
         
         # Determine the subset to explain to save time
         explain_len = min(len(test_data), 50)
@@ -126,7 +126,7 @@ class LSTMExplainer(TimeseriesExplainerBase):
             shap_array = self.shap_values[0] if isinstance(self.shap_values, list) else self.shap_values
 
         # raw_data shape: (Samples, Lookback, Features)
-        look_back = self.look_back
+        look_back = self.config["look_back"]
         features = self.config["feature_names"]
         
         # 3. Flatten 3D to 2D
@@ -136,8 +136,9 @@ class LSTMExplainer(TimeseriesExplainerBase):
         
         # Reshape: (N, Time, Feat) -> (N, Time * Feat)
         shap_flat = shap_array.reshape(shap_array.shape[0], -1)
-        data_flat = self.raw_data.reshape(self.raw_data.shape[0], -1)
-        
+        #data_flat = self.raw_data.reshape(self.raw_data.shape[0], -1)
+        data_flat = self.raw_data_values.reshape(self.raw_data_values.shape[0], -1)
+
         # 4. Create DataFrames
         shap_df = pd.DataFrame(shap_flat, columns=flat_cols_shap)
         data_df = pd.DataFrame(data_flat, columns=flat_cols_data)
@@ -147,7 +148,8 @@ class LSTMExplainer(TimeseriesExplainerBase):
         import torch
         self.model.eval()
         with torch.no_grad():
-            test_tensor = torch.tensor(self.raw_data).float()
+            #test_tensor = torch.tensor(self.raw_data).float()
+            test_tensor = torch.tensor(self.raw_data_values).float()
             preds = self.model(test_tensor).numpy().flatten()
         
         pred_df = pd.DataFrame({"Model_Prediction": preds})

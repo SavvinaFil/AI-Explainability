@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 
 np.random.seed(42)
 
-# Path Setup
+# --- 1. Path Setup ---
 root_dir = Path(__file__).resolve().parents[3]
 model_dir = root_dir / "source" / "models"
 data_dir = root_dir / "source" / "data"
@@ -15,7 +15,7 @@ data_dir = root_dir / "source" / "data"
 model_dir.mkdir(parents=True, exist_ok=True)
 data_dir.mkdir(parents=True, exist_ok=True)
 
-# Define your specific names here
+# --- Define your specific names here ---
 model_filename = "rf_classify.pkl"
 data_filename = "rf_classify_data.csv"
 
@@ -23,7 +23,7 @@ data_filename = "rf_classify_data.csv"
 model_save_path = model_dir / model_filename
 data_save_path = data_dir / data_filename
 
-# 2. Data Generation
+# --- 2. Data Generation (Keep as is) ---
 n_samples = 1000
 ages = np.random.randint(18, 70, size=n_samples)
 
@@ -55,12 +55,12 @@ df["Loan Approved"] = (
     )
 ).astype(int)
 
-# Save Dataset
+# --- 3. Save Dataset ---
 # Use the full path including the filename
 df.to_csv(data_save_path, index=False)
 print(f"Dataset saved to: {data_save_path}")
 
-# Train Model
+# --- 4. Train Model ---
 features = ["Age", "Income per Year", "Years of Employment"]
 
 X = df[features]
@@ -69,7 +69,8 @@ y = df["Loan Approved"]
 model = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
 model.fit(X, y)
 
-# Save Model
+# --- 5. Save Model ---
+# Save the model
 with open(model_save_path, "wb") as f:
     pickle.dump(model, f)
 
