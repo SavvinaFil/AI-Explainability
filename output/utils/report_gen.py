@@ -15,7 +15,7 @@ def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_pa
 
     nb = nbf.v4.new_notebook()
 
-    # --- 1. Extract Metadata from Config ---
+    # 1. Extract Metadata from Config
     config = explainer_inst.config
     model_type = config.get("model_type", "Unknown").upper()
     explainer_type = config.get("explainer_type", "SHAP")
@@ -24,7 +24,7 @@ def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_pa
     output_labels = config.get("output_labels", {})
     is_timeseries = config.get("analysis") == "timeseries" and raw_data.ndim == 3
 
-    # --- 2. Dynamic Explainer Description ---
+    # 2. Dynamic Explainer Description
     if "gradient" in explainer_type.lower():
         explainer_desc = (
             "**Gradient SHAP** is designed for deep learning models. It explains predictions by "
@@ -77,7 +77,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 """))
 
-    # --- 3. Save data to .npz file instead of embedding inline ---
+    # 3. Save data to .npz file instead of embedding inline
     # This avoids MemoryError when datasets are large (e.g. 1500 samples x 6 features x 6 targets)
     if all_shap_values is None and shap_values is not None:
         all_shap_data = {0: shap_values}
@@ -127,7 +127,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
 """
     cells.append(nbf.v4.new_code_cell(code_setup))
 
-    # --- 4. Loop Through Targets ---
+    # 4. Loop Through Targets
     for target_idx in all_shap_data.keys():
         # Resolve correct label for each target — handles all 3 shapes
         if isinstance(output_labels, list):
@@ -150,7 +150,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
         cells.append(nbf.v4.new_markdown_cell(f"---\n# Analysis for: **{label}**"))
         cells.append(nbf.v4.new_markdown_cell(f"## Analysis for Target: `{label}`\n---"))
 
-        # --- PLOT 1: BEESWARM ---
+        # PLOT 1: BEESWARM
         cells.append(nbf.v4.new_markdown_cell(f"""### 1. Feature Impact Distribution (Beeswarm)
 **What is this?** A distribution of SHAP values for every sample in the dataset.
 **What to focus on:**
@@ -167,7 +167,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
             f"plt.show()"
         ))
 
-        # --- PLOT 2: BAR CHART ---
+        # PLOT 2: BAR CHART
         cells.append(nbf.v4.new_markdown_cell(f"""### 2. Global Feature Importance
 **What is this?** The mean absolute SHAP value for each feature.
 **What to focus on:** The length of the bar represents the global influence of a feature — how much it moves the prediction on average, regardless of direction."""))
@@ -180,7 +180,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
             f"plt.show()"
         ))
 
-        # --- PLOT 3: TEMPORAL (Optional — LSTM only) ---
+        # PLOT 3: TEMPORAL (Optional — LSTM only)
         if is_timeseries:
             cells.append(nbf.v4.new_markdown_cell(f"""### 3. Temporal Relevance
 **What is this?** A look at which time-steps in the `{look_back}` window are most influential.
@@ -201,7 +201,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
                 f"plt.show()"
             ))
 
-        # --- PLOT 4: TOP 5 DRIVERS ---
+        # PLOT 4: TOP 5 DRIVERS
         cells.append(nbf.v4.new_markdown_cell(f"""### 4. Focused View: Top 5 Drivers
 **What is this?** A high-precision look at the five most critical variables for `{label}`.
 **What to focus on:** The gap between the 1st and 5th feature. If the 1st is much larger, the model is heavily reliant on a single variable."""))
@@ -218,7 +218,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
             f"plt.show()"
         ))
 
-    # --- 5. Execution and Saving ---
+    # 5. Execution and Saving
     nb['cells'] = cells
     ep = ExecutePreprocessor(timeout=600, kernel_name='python3')
     try:
