@@ -3,11 +3,12 @@
 This project implements a Time-Series forecasting pipeline designed to predict solar power generation (PV) using Long Short-Term Memory (LSTM) networks. The model leverages historical power data, weather observations, and cyclical temporal features to capture the non-linear dynamics of solar energy production.
 
 ## 1. Model Overview: Many-to-One Forecasting
-The core of the architecture is a **2-layer LSTM Forecaster**. Configured as a Sliding-Window Predictor, the model ingests a sequence of historical data points to generate a single-point prediction for the immediate future.
+The core of the architecture is a **2-layer LSTM Forecaster**. It is configured as a "many-to-one" model, meaning it looks back at a window of historical data to predict a single value in the future.
 
 * **Look-back Window:** 6 hours ($t-6$ to $t-1$).
 * **Input Dimensions:** 12 features per time step, including lagged PV values, rolling statistics, and Global Horizontal Irradiance (GHI).
 * **Temporal Encoding:** To help the model understand periodicity, we transform time variables (hour, day of week, month) into cyclical sine and cosine components.
+
 
 
 ## 2. SHAP Interpretability Strategy
@@ -35,24 +36,25 @@ To run the analysis, you must populate the configuration file with the paths to 
   "analysis": "timeseries",
   "package": "pytorch",
   "model_type": "lstm",
-  "explainer_type": "gradient",
-
   "model_path": "source/models/lstm_model.pth",
   "background_data_path": "source/data/lstm_background_data.pt",
   "test_data_path": "source/data/lstm_data_to_explain.pt",
   "dataset_path": "energy_forecasting_dataset.csv",
-
   "output_dir": "output/",
-  "save_excel": false,
-  "generate_notebook": true,
-
+  "save_excel": true,
   "dataset_scope": "whole",
-
-  "feature_names": ["PV", "ghi", "PV_lag_24", "PV_lag_168", 
-            "PV_roll_mean_3", "PV_roll_std_3",
-            "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos"],
-  "output_labels": ["PV"]
-  
+  "generate_notebook": true,                        
+  "feature_names": [
+    "PV", "ghi", "PV_lag_24", "PV_lag_168", 
+    "PV_roll_mean_3", "PV_roll_std_3",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos"
+  ],
+  "output_labels": ["PV"],
+  "input_dim": 12,
+  "hidden_size": 16,
+  "look_back": 6,
+  "look_ahead": 1,
+  "explainer_type": "gradient"
 }
 ```
 

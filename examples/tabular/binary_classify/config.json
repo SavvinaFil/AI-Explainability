@@ -13,8 +13,8 @@
   "generate_notebook": true,
   
   "feature_names": [
-    "Age",
-    "Income per Year",
+    "Age", 
+    "Income per Year", 
     "Years of Employment"
   ],
 

@@ -1,6 +1,6 @@
 # 🛡️ AI Explainability Analysis Toolbox
 
-Neural Networks excel at navigating the complexities of the energy transition, but their decisions often remain "black boxes." This toolbox strips away the mystery by providing a standardized, model-agnostic framework for AI explainability using SHAP. It transforms complex model behavior into physically grounded insights—ensuring that when an AI makes a high-stakes decision, you can trace it back to the fundamental drivers of the energy system.
+Neural Networks excel at navigating the complexities of the energy transition, but their decisions often remain "black boxes." This toolbox strips away the mystery by providing a standardized, model-agnostic framework for AI explainability using SHAP. It transforms complex model behavior into auditable, physically grounded insights—ensuring that when an AI makes a high-stakes decision, you can trace it back to the fundamental drivers of the energy system.
 
 ---
 
@@ -19,27 +19,12 @@ In the energy sector, knowing *that* a model predicted a price spike or a solar 
 * **Model Debugging:** Diagnosing **systemic biases** or data leakage by identifying overpowering features.
 * **Regulatory & Market Compliance:** Establishing a clear **audit trail** for automated decisions.
 
-> [!IMPORTANT]
-> While traditional "Feature Importance" tells you what the model values across the entire dataset, **SHAP tells you why the model made a specific decision right now.**
+> **Key Takeaway:** While traditional "Feature Importance" tells you what the model values across the entire dataset, **SHAP tells you why the model made a specific decision right now.**
 
 ---
 
-## 🛠️ Installation & Setup
-
-To run this project, we recommend using [Conda](https://docs.anaconda.com/free/anaconda/install/index.html) to manage your dependencies and avoid version conflicts.
-
-### Create the Environment
-First, clone the repository and navigate into the folder. Then, create the `shap_aie` environment:
-
-```bash
-# Using the environment.yml (Recommended for Conda users)
-conda env create -f environment.yml
-
-```
 
 ## ⚡ Quickstart
-
-To get started using this toolbox, please follow the following steps:
 
 ### 1. Prepare your Assets
 Place your trained model and the dataset you want to explain in the `source/` directory:
@@ -97,7 +82,7 @@ python main.py --config examples/tabular/multioutput_regress/config.json
 The toolbox generates two primary artifacts in the output/ folder:
 
 1. SHAP Audit (.xlsx): A multi-sheet spreadsheet containing original feature values, model predictions, and SHAP values for every row. Each target index gets its own sheet.
-2. Interpretation Report (.ipynb): A fully executed Jupyter Notebook containing various insightfull plots and a temporal analysis (for LSTMs).
+2. Interpretation Report (.ipynb): A fully executed Jupyter Notebook containing Summary Plots, Feature Importance Bar Charts, and Temporal Analysis (for LSTMs).
 
 You can find examples of the jupyter notebooks here:
 
@@ -117,6 +102,7 @@ For detailed guides and tutorials, refer to our documentation suite:
 
 * **[Tutorial: LSTM Time-Series Analysis](./docs/tutorials/timeseries/lstm.md):** A step-by-step guide to training and explaining Long Short-Term Memory networks for temporal data.
 * **[Tutorial: Random Forest Binary Classification](./docs/tutorials/tabular/dc_binary_classify.md):** A comprehensive walkthrough for training and interpreting a binary classification model.
+* **[Tutorial: Multi-Output Random Forest Classification](./docs/tutorials/tabular/dc_multioutput_classify.md):** A specialized guide for handling multi-target classification tasks and analyzing joint feature importance.
 * **[Tutorial: Random Forest Regression](./docs/tutorials/tabular/dc_multioutput_regress.md):** A deep dive into training regression models and decoding the drivers behind continuous predictions.
 * **[Configuration Guide](./docs/configuration.md):** A complete technical breakdown of all `config.yaml` parameters and environment settings.
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
@@ -127,10 +113,10 @@ For detailed guides and tutorials, refer to our documentation suite:
 ```text
 /
 ├── analysis/
-│   ├── tabular/                # Logic for models trained with tabular data 
+│   ├── tabular/                # Logic for CSV-based data (RF, XGB, etc.)
 │   │   ├── treebased/          # Tree-specific explainers
 │   │   └── __init__.py         # Tabular manager and registry
-│   └── timeseries/             # Logic timeseries models
+│   └── timeseries/             # Logic for 3D temporal data (LSTM, GRU)
 │       └── lstm_explainer.py   # PyTorch-specific SHAP implementation
 │
 ├── output/                     # Generated Reports and Audit logs
