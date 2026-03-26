@@ -2,3 +2,9 @@
 # examples/tabular/multioutput_classify/
 docs/tutorials/tabular/dc_multioutput_classify.md
 .idea/
+__pycache__
+AI_explainability.proto
+AI_explainability_pb2.py
+AI_explainability_pb2_grpc.py
+client.py
+server.py
