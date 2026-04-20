@@ -104,22 +104,30 @@ Create a JSON file to define the analysis scope. This file tells the toolbox whe
 </details>
 
 ### 3. Run the Toolbox
-Execute the analysis via the command line using the `--config` flag. After a `pip install` you can use the installed `ai-explainability` console script; from a cloned source tree you can still run `python main.py` directly.
+How you launch an analysis depends on whether you installed the package with `pip` or are working from a cloned source tree.
 
-* Run Time-Series Analysis
+#### After `pip install` — installed package
+Once installed, you do **not** run `python main.py` any more (there is no `main.py` in your working directory). Instead, use either the installed console script or call the package's Python API. Both read the same config JSON you already write.
+
+**From a shell** — the `ai-explainability` console script is placed on your `PATH` by pip:
 ```bash
-ai-explainability --config examples/timeseries/lstm/config.json
-# equivalent: python main.py --config examples/timeseries/lstm/config.json
+ai-explainability --config path/to/config.json
 ```
 
-* Run Tabular Classification
-```bash
-ai-explainability --config examples/tabular/binary_classify/config.json
-```
+**From Python or a Databricks notebook** — import the package and call `run()` with the same flags you'd pass on the command line:
+```python
+import ai_explainability
 
-* Run Tabular Regression
+ai_explainability.run(["--config", "path/to/config.json"])
+```
+This is the recommended entry point inside a notebook because it keeps everything in one process (no subprocess, no working-directory juggling) and returns control to the next cell when the analysis finishes.
+
+#### From a cloned source tree — development mode
+If you cloned the repo and haven't `pip install`-ed it, keep using the script directly:
 ```bash
-ai-explainability --config examples/tabular/multioutput_regress/config.json
+python main.py --config examples/timeseries/lstm/config.json
+python main.py --config examples/tabular/binary_classify/config.json
+python main.py --config examples/tabular/multioutput_regress/config.json
 ```
 
 ---

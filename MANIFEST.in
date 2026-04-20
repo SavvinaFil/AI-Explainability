@@ -5,6 +5,7 @@ include pyproject.toml
 include AI_explainability.proto
 include config.json
 recursive-include docs *.md
+recursive-include ai_explainability *.py
 recursive-include analysis *.py
 recursive-include output *.py
 
