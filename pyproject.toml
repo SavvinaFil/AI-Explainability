@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-explainability"
-version = "0.1.0"
+version = "0.2.0"
 description = "A standardized, model-agnostic toolbox for AI explainability using SHAP, with a focus on energy-sector workflows."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,9 +68,15 @@ grpc = [
     "grpcio-tools>=1.60",
     "protobuf>=4.24",
 ]
+# PySpark support — lets aie.explain() accept pyspark.sql.DataFrame directly.
+# Most Databricks clusters already ship with pyspark preinstalled; this extra is
+# for local / non-cluster environments that want the same DataFrame path.
+spark = [
+    "pyspark>=3.4",
+]
 # Convenience meta-extra that pulls everything.
 all = [
-    "ai-explainability[torch,grpc]",
+    "ai-explainability[torch,grpc,spark]",
 ]
 # Developer tooling.
 dev = [

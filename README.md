@@ -130,6 +130,29 @@ python main.py --config examples/tabular/binary_classify/config.json
 python main.py --config examples/tabular/multioutput_regress/config.json
 ```
 
+### 4. In-memory usage (no config file, no disk I/O)
+For Databricks / Colab / any environment where you'd rather not serialise models and DataFrames to disk, skip the JSON config entirely and call `ai_explainability.explain(...)` with your fitted model and in-memory data:
+
+```python
+import ai_explainability as aie
+
+result = aie.explain(
+    model=my_fitted_model,         # sklearn / xgboost / torch / statsmodels object
+    data=my_dataframe,             # pd.DataFrame, pyspark.sql.DataFrame, ndarray, or path
+    analysis="tabular",
+    model_type="random_forest",
+    feature_names=["Wind_Speed", "Temp", "Humidity"],
+    target_index=[0, 1, 2],
+)
+
+result.shap_values            # dict[int, np.ndarray]
+result.predictions            # dict[int, np.ndarray]
+result.to_dataframe()         # flat DataFrame — handy for display()
+result.save_excel("out.xlsx") # opt-in, only if you want disk output
+```
+
+`save_excel` and `generate_notebook` default to `False` and `output_dir` is not auto-created, so a call like the one above touches zero files. Full walkthrough including a Unity Catalog + Delta example is in [`docs/databricks.md`](./docs/databricks.md).
+
 ---
 
 ## 📊 Outputs
@@ -160,6 +183,7 @@ For detailed guides and tutorials, refer to our documentation suite:
 * **[Tutorial: Multi-Output Random Forest Classification](./docs/tutorials/tabular/dc_multioutput_classify.md):** A specialized guide for handling multi-target classification tasks and analyzing joint feature importance.
 * **[Tutorial: Random Forest Regression](./docs/tutorials/tabular/dc_multioutput_regress.md):** A deep dive into training regression models and decoding the drivers behind continuous predictions.
 * **[Configuration Guide](./docs/configuration.md):** A complete technical breakdown of all `config.yaml` parameters and environment settings.
+* **[In-memory / Databricks Guide](./docs/databricks.md):** End-to-end walkthrough of the `ai_explainability.explain(...)` API for pipelines that don't want to touch disk.
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
 
 

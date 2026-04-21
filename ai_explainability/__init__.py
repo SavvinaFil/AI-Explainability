@@ -1,33 +1,34 @@
 """
 AI Explainability — public import entry point.
 
-The repository is organised with several sibling top-level packages (``analysis``,
-``output``) and a ``main`` CLI module at the root. This shim gives users a single,
-canonical import path that matches the distribution name on PyPI / GitHub:
+This package provides two complementary ways to run an analysis:
 
-    >>> import ai_explainability
-    >>> ai_explainability.__version__
-    '0.1.0'
-    >>> ai_explainability.run(["--config", "config.json"])
+1. **Config-driven / CLI** — unchanged from the original tool. Either call
+   the ``ai-explainability`` console script or ``ai_explainability.run()``
+   with argv, and the existing ``config.json`` file drives everything.
 
-The shim is deliberately lightweight: it does **not** import ``analysis``, ``shap``,
-``torch``, or any other heavy runtime dependency at import time. That means
-``import ai_explainability`` stays fast and will not crash on a minimal install
-(e.g. a Databricks cluster that hasn't yet installed the optional ``[torch]``
-extra). The heavy modules are pulled in lazily when ``run()`` is actually called
-or when a user explicitly reaches for a submodule via ``__getattr__``.
+2. **Programmatic / in-memory** — call :func:`ai_explainability.explain`
+   with a fitted model object and an in-memory ``pandas.DataFrame`` (or
+   ``pyspark.sql.DataFrame``, ``numpy.ndarray``, etc). Returns a
+   :class:`ExplanationResult` without touching disk.
 
-Existing code that uses the original top-level imports (``from analysis import
-ANALYSIS_ROUTER``) continues to work unchanged.
+The package stays intentionally cheap to import: the heavy runtime stack
+(``shap``, ``torch``, ``pyspark``, ``nbconvert``) is only pulled in when a
+function that actually needs it is called.
 """
 
 from __future__ import annotations
 
 from typing import Sequence
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-__all__ = ["__version__", "run"]
+__all__ = [
+    "__version__",
+    "run",
+    "explain",
+    "ExplanationResult",
+]
 
 
 def run(argv: Sequence[str] | None = None) -> None:
@@ -58,11 +59,23 @@ def run(argv: Sequence[str] | None = None) -> None:
         sys.argv = old_argv
 
 
+def explain(*args, **kwargs):
+    """Forwarder to :func:`ai_explainability.api.explain`.
+
+    Defined here (rather than a direct re-export) so that ``import
+    ai_explainability`` stays free of heavy imports. The actual API module
+    is loaded on first call.
+    """
+    from .api import explain as _explain
+
+    return _explain(*args, **kwargs)
+
+
 def __getattr__(name: str):
     """Lazy attribute access for advanced users.
 
-    Allows ``from ai_explainability import ANALYSIS_ROUTER`` without paying the
-    import cost up-front. Unknown attributes raise ``AttributeError`` as usual.
+    Allows ``from ai_explainability import ANALYSIS_ROUTER`` without paying
+    the import cost up-front. Also resolves ``ExplanationResult`` on demand.
     """
     _lazy_map = {
         "ANALYSIS_ROUTER": ("analysis", "ANALYSIS_ROUTER"),
@@ -77,4 +90,11 @@ def __getattr__(name: str):
         value = getattr(mod, attr)
         globals()[name] = value  # cache for subsequent accesses
         return value
+
+    if name == "ExplanationResult":
+        from .result import ExplanationResult as _ER
+
+        globals()["ExplanationResult"] = _ER
+        return _ER
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
