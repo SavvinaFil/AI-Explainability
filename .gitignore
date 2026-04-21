@@ -8,3 +8,4 @@ AI_explainability_pb2.py
 AI_explainability_pb2_grpc.py
 client.py
 server.py
+test_in_memory_local.py
