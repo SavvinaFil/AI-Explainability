@@ -24,30 +24,15 @@ def _load_timeseries():
     return import_module("analysis.timeseries").run_timeseries_analysis
 
 
-class _LazyRouter(dict):
-    """Dict-like router that imports the target orchestrator on first access."""
-
-    _loaders = {
-        "tabular": _load_tabular,
-        "timeseries": _load_timeseries,
-    }
-
-    def __getitem__(self, key: str):
-        if key not in self and key in self._loaders:
-            super().__setitem__(key, self._loaders[key]())
-        return super().__getitem__(key)
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._loaders or super().__contains__(key)
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
-ANALYSIS_ROUTER = _LazyRouter()
+# ``ANALYSIS_ROUTER`` is a plain dict — so ``.get()``, ``.keys()``, ``in`` and
+# iteration all behave exactly like the original eager dict — but each value is
+# a thin wrapper that defers the actual submodule import until it is *called*.
+# This keeps ``import ai_explainability`` cheap without breaking consumers like
+# ``main.py`` that read ``ANALYSIS_ROUTER.keys()`` or call ``.get(...)``.
+ANALYSIS_ROUTER = {
+    "tabular": lambda *args, **kwargs: _load_tabular()(*args, **kwargs),
+    "timeseries": lambda *args, **kwargs: _load_timeseries()(*args, **kwargs),
+}
 
 
 def __getattr__(name: str) -> Any:

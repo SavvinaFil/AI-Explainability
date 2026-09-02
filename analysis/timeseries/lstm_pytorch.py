@@ -38,6 +38,9 @@ class LSTMExplainer(TimeseriesExplainerBase):
       samples to explain.
     """
 
+    #: Explainer types this class knows how to build.
+    SUPPORTED_EXPLAINERS = ("gradient", "deep")
+
     def __init__(self, config, *, model=None, background_data=None, test_data=None):
         super().__init__(
             config,
@@ -45,11 +48,10 @@ class LSTMExplainer(TimeseriesExplainerBase):
             background_data=background_data,
             test_data=test_data,
         )
-        # Legacy-compat convenience: expose generate_notebook as a method so
-        # third-party code calling ``explainer.generate_notebook(...)`` still
-        # works. Bind lazily so the nbformat/nbconvert chain is only imported
-        # when the method is actually accessed.
-        self._bound_generate_notebook = None
+        # NOTE: ``LSTMForecaster`` has a single output head (``fc`` →
+        # ``Linear(hidden, 1)``), so ``look_ahead > 1`` (multi-step forecasting)
+        # is not yet supported even though the config accepts the key. Multi-step
+        # would require a wider output layer and per-step SHAP handling.
 
     # ------------------------------------------------------------------ #
     # Setup                                                              #
@@ -87,7 +89,9 @@ class LSTMExplainer(TimeseriesExplainerBase):
             self.model.load_state_dict(state_dict)
 
         self.model.eval()
-        torch.set_grad_enabled(True)
+        # NOTE: gradient-based SHAP needs grad enabled, but we do NOT flip the
+        # global torch grad state here (that would leak into the caller's
+        # process). ``explain()`` enables grad locally only around the SHAP call.
         print("Model ready for explanation.")
 
     # ------------------------------------------------------------------ #
@@ -97,8 +101,18 @@ class LSTMExplainer(TimeseriesExplainerBase):
         """Produce SHAP explanations using either in-memory tensors or disk paths."""
         from ai_explainability.io import to_torch_tensor
 
-        # Resolve background & test data — prefer the in-memory kwargs passed
-        # through the base class.
+        # 0. Validate the explainer type up-front with a clear error, rather
+        #    than silently leaving ``self.shap_values`` unset (which used to
+        #    crash later with an opaque AttributeError).
+        explainer_type = self.config.get("explainer_type", "gradient")
+        if explainer_type not in self.SUPPORTED_EXPLAINERS:
+            raise ValueError(
+                f"Unsupported explainer_type {explainer_type!r} for LSTMExplainer. "
+                f"Choose one of {self.SUPPORTED_EXPLAINERS}."
+            )
+
+        # 1. Resolve background & test data — prefer the in-memory kwargs passed
+        #    through the base class, otherwise coerce whatever is on disk.
         if self.background_data is not None:
             background = to_torch_tensor(self.background_data)
         else:
@@ -108,7 +122,7 @@ class LSTMExplainer(TimeseriesExplainerBase):
                     "LSTMExplainer needs either a 'background_data' kwarg or "
                     "config['background_data_path']."
                 )
-            background = torch.load(bg_path)
+            background = to_torch_tensor(bg_path)
 
         if self.test_data is not None:
             test_data = to_torch_tensor(self.test_data)
@@ -119,45 +133,67 @@ class LSTMExplainer(TimeseriesExplainerBase):
                     "LSTMExplainer needs either a 'test_data' kwarg or "
                     "config['test_data_path']."
                 )
-            test_data = torch.load(test_path)
+            test_data = to_torch_tensor(test_path)
 
-        # Determine the subset to explain to save time
-        explain_len = min(len(test_data), 50)
+        # 2. Shape validation — the LSTM path expects 3D tensors
+        #    (n_samples, look_back, n_features). Fail loudly and helpfully.
+        for name, tensor in (("background_data", background), ("test_data", test_data)):
+            if tensor.dim() != 3:
+                raise ValueError(
+                    f"LSTMExplainer expects a 3D {name} tensor "
+                    f"(n_samples, look_back, n_features); got shape "
+                    f"{tuple(tensor.shape)}."
+                )
+
+        # 3. Determine the subset to explain (configurable, default 50).
+        explain_len = min(len(test_data), int(self.config.get("explain_subset", 50)))
         test_subset = test_data[:explain_len]
 
-        # Initialize Explainer
-        if self.config["explainer_type"] == "gradient":
-            explainer = shap.GradientExplainer(self.model, background)
-            self.shap_values = explainer(test_subset)
-        elif self.config["explainer_type"] == "deep":
-            explainer = shap.DeepExplainer(self.model, background)
-            self.shap_values = explainer.shap_values(
-                test_subset, check_additivity=False
-            )
+        # 4. Build the explainer and compute SHAP values. Use the ``.shap_values``
+        #    API for BOTH gradient and deep so the return shape is consistent and
+        #    portable across shap versions. Enable grad locally (needed by the
+        #    gradient/deep backends) and restore the previous state afterwards.
+        prev_grad = torch.is_grad_enabled()
+        try:
+            torch.set_grad_enabled(True)
+            if explainer_type == "gradient":
+                explainer = shap.GradientExplainer(self.model, background)
+                shap_raw = explainer.shap_values(test_subset)
+            else:  # "deep"
+                explainer = shap.DeepExplainer(self.model, background)
+                shap_raw = explainer.shap_values(test_subset, check_additivity=False)
+        finally:
+            torch.set_grad_enabled(prev_grad)
 
-        # Define the numpy versions consistently (exact 50 samples explained)
+        self.shap_values = shap_raw
+
+        # 5. Numpy view of the exact samples explained.
         self.raw_data_values = (
             test_subset.detach().cpu().numpy()
             if isinstance(test_subset, torch.Tensor)
             else np.asarray(test_subset)
         )
 
-        # Extract values for the dictionary
-        if hasattr(self.shap_values, "values"):
-            # GradientExplainer returns an Explanation object
-            val_to_plot = self.shap_values.values
+        # 6. Normalise the SHAP output to a single ndarray for the single-output
+        #    LSTM head. ``.shap_values`` returns a list (one entry per model
+        #    output) for both gradient and deep; a bare ndarray is also handled.
+        if isinstance(shap_raw, list):
+            val_to_plot = shap_raw[0]
+        elif hasattr(shap_raw, "values"):  # Explanation object, just in case
+            val_to_plot = shap_raw.values
         else:
-            # DeepExplainer returns a list of arrays (one per output)
-            val_to_plot = (
-                self.shap_values[0]
-                if isinstance(self.shap_values, list)
-                else self.shap_values
-            )
+            val_to_plot = shap_raw
+
+        # Some shap versions append a trailing singleton output axis
+        # (n, look_back, features, 1) — squeeze it so the array is 3D.
+        val_to_plot = np.asarray(val_to_plot)
+        if val_to_plot.ndim == 4 and val_to_plot.shape[-1] == 1:
+            val_to_plot = val_to_plot[..., 0]
 
         # Align with the Multi-Target format for generate_notebook
         self.all_shap_values = {0: val_to_plot}
 
-        # Predictions for the same subset
+        # 7. Predictions for the same subset.
         with torch.no_grad():
             preds = self.model(test_subset).detach().cpu().numpy().flatten()
         self.all_predictions = {0: preds}

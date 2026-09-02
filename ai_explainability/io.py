@@ -198,3 +198,71 @@ def to_torch_tensor(obj: Any) -> Any:
     raise TypeError(
         f"Cannot coerce object of type {type(obj).__name__} to torch.Tensor."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Framework detection + prediction-function builder (feedforward NN explainer) #
+# --------------------------------------------------------------------------- #
+def detect_framework(model: Any) -> str:
+    """Best-effort detection of a model's deep-learning framework.
+
+    Returns ``"pytorch"``, ``"tensorflow"``, or ``"unknown"`` — without
+    importing either framework. Detection walks the class MRO and inspects
+    module names, so it works even when only one of torch / tf is installed.
+    """
+    for klass in type(model).__mro__:
+        module = getattr(klass, "__module__", "") or ""
+        root = module.split(".", 1)[0]
+        if root == "torch":
+            return "pytorch"
+        if root in {"tensorflow", "keras"}:
+            return "tensorflow"
+    # Duck-typed fallbacks.
+    if hasattr(model, "state_dict") and hasattr(model, "forward"):
+        return "pytorch"
+    if hasattr(model, "predict") and hasattr(model, "call"):
+        return "tensorflow"
+    return "unknown"
+
+
+def make_predict_fn(model: Any, framework: str | None = None):
+    """Return a numpy-in / numpy-out prediction function for ``model``.
+
+    This is what :class:`shap.KernelExplainer` needs — a plain callable that
+    maps a 2D ndarray of inputs to a 1D/2D ndarray of outputs, regardless of
+    the underlying framework. ``framework`` may be ``"pytorch"`` /
+    ``"tensorflow"``; when ``None`` it is auto-detected.
+    """
+    fw = (framework or detect_framework(model)).lower()
+
+    if fw in {"pytorch", "torch"}:
+        import torch
+
+        def _torch_predict(x):
+            model.eval()
+            with torch.no_grad():
+                t = torch.as_tensor(np.asarray(x), dtype=torch.float32)
+                out = model(t)
+            arr = out.detach().cpu().numpy()
+            return arr.squeeze(-1) if arr.ndim > 1 and arr.shape[-1] == 1 else arr
+
+        return _torch_predict
+
+    if fw in {"tensorflow", "tf", "keras"}:
+
+        def _keras_predict(x):
+            out = np.asarray(model.predict(np.asarray(x), verbose=0))
+            return out.squeeze(-1) if out.ndim > 1 and out.shape[-1] == 1 else out
+
+        return _keras_predict
+
+    raise ValueError(
+        f"Cannot build a predict function for framework {fw!r}. "
+        "Pass package='pytorch' or package='tensorflow' in the config."
+    )
+
+
+def to_numpy_2d(data: Any, *, feature_names: Sequence[str] | None = None) -> np.ndarray:
+    """Coerce tabular ``data`` to a 2D float ndarray (uses :func:`to_pandas`)."""
+    df = to_pandas(data, feature_names=feature_names)
+    return df.to_numpy(dtype="float32")

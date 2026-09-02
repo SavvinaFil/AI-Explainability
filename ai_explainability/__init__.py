@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",

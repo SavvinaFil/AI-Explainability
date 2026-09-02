@@ -51,12 +51,17 @@ _KNOWN_KWARGS = {
     "look_back",
     "look_ahead",
 }
+# NOTE: keys that are NOT handled as explicit parameters above (e.g.
+# ``explain_subset``, ``kernel_nsamples``, ``background_size``, ``framework``,
+# ``model_path``, ``dataset_path``) must be left OUT of ``_KNOWN_KWARGS`` so
+# they flow through ``**extras`` into the config dict untouched.
 
 
 def _build_config(
     *,
     analysis: str,
     model_type: str,
+    package: str | None,
     feature_names: Sequence[str] | None,
     target_index: int | Sequence[int] | None,
     output_labels: Mapping | Sequence | None,
@@ -77,6 +82,9 @@ def _build_config(
         "analysis": analysis,
         "model_type": model_type,
     }
+    if package is not None:
+        # Framework selector for neural explainers ("pytorch" / "tensorflow").
+        cfg["package"] = package
     if feature_names is not None:
         cfg["feature_names"] = list(feature_names)
     if target_index is not None:
@@ -118,6 +126,7 @@ def explain(
     *,
     analysis: str = "tabular",
     model_type: str = "random_forest",
+    package: str | None = None,
     feature_names: Sequence[str] | None = None,
     target_index: int | Sequence[int] | None = None,
     output_labels: Mapping | Sequence | None = None,
@@ -181,6 +190,7 @@ def explain(
     config = _build_config(
         analysis=analysis,
         model_type=model_type,
+        package=package,
         feature_names=feature_names,
         target_index=target_index,
         output_labels=output_labels,
@@ -201,7 +211,9 @@ def explain(
     if analysis == "tabular":
         from analysis.tabular import run_tabular_analysis
 
-        return run_tabular_analysis(config, model=model, data=data)
+        return run_tabular_analysis(
+            config, model=model, data=data, background_data=background_data
+        )
 
     # timeseries
     from analysis.timeseries import run_timeseries_analysis
