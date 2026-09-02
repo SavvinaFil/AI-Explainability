@@ -9,3 +9,10 @@ AI_explainability_pb2_grpc.py
 client.py
 server.py
 test_in_memory_local.py
+
+# Python build / packaging artifacts (auto-generated, never commit)
+*.egg-info/
+build/
+dist/
+*.egg
+.eggs/
