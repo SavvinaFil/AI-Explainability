@@ -22,7 +22,11 @@ def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_pa
     features = config.get("feature_names", [])
     look_back = config.get("look_back", 1)
     output_labels = config.get("output_labels", {})
-    is_timeseries = config.get("analysis") == "timeseries" and raw_data.ndim == 3
+    is_timeseries = (
+        config.get("analysis") == "timeseries"
+        and raw_data is not None
+        and getattr(raw_data, "ndim", None) == 3
+    )
 
     # 2. Dynamic Explainer Description
     if "gradient" in explainer_type.lower():

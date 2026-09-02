@@ -65,12 +65,48 @@ The requirement for background data shifts based on your chosen `explainer_type`
 
 | Parameter | Purpose |
 | :--- | :--- |
-| `analysis` | The class of problem, such as `timeseries` for forecasting with LSTMs. |
-| `explainer_type` | Specifies the algorithm (e.g., `gradient` for NNs, `tree` for Random Forest, `kernel` for black-box). |
+| `analysis` | The class of problem: `tabular` (trees, feedforward NNs) or `timeseries` (LSTM, ARIMA). |
+| `model_type` | Which explainer to use: `random_forest`, `feedforward` (aka `mlp`), `lstm`, `arima`. |
+| `package` | Framework for neural models: `pytorch` or `tensorflow`. Auto-detected from the model object when omitted. |
+| `explainer_type` | Specifies the SHAP algorithm (e.g., `gradient` / `deep` for NNs, `kernel` for black-box, `tree` for Random Forest). |
 | `look_back` | The temporal horizon; e.g., `6` means the explainer audits the 6 previous time steps. |
 | `input_dim` | The number of features per time step. |
+| `explain_subset` | (LSTM) How many samples to explain. Defaults to `50`. |
+| `kernel_nsamples` | (Feedforward, KernelSHAP) Coalition-sampling budget. Defaults to `"auto"`. |
+| `background_size` | (Feedforward) Rows to summarise into a background set when no explicit background is given. Defaults to `100`. |
 | `dataset_scope` | Usually set to `whole` to ensure scaling context is maintained across the entire project. |
 | `generate_notebook` | If `true`, exports a `.ipynb` file for interactive post-run analysis. |
+
+### Feedforward neural networks (MLP)
+
+A standard fully-connected network on tabular data is a **`tabular`** analysis with `model_type: "feedforward"` (aliases: `mlp`, `neural_net`). It supports both PyTorch and TensorFlow/Keras via the `package` key, and lets you pick the SHAP backend with `explainer_type`:
+
+| `explainer_type` | Backend | Needs background? | Notes |
+| :--- | :--- | :--- | :--- |
+| `kernel` | `shap.KernelExplainer` | Mandatory | Model-agnostic, works for any framework. Safe default; cost scales with `kernel_nsamples`. |
+| `gradient` | `shap.GradientExplainer` | Required (reference) | Framework-native, fast for NNs. |
+| `deep` | `shap.DeepExplainer` | Required (reference) | Framework-native; support varies by SHAP/framework version. |
+
+If you don't pass a `background_data` / `background_data_path`, the toolbox summarises your input with K-Means (`background_size` rows) so kernel/deep/gradient still work.
+
+Example (`config.json`):
+
+```jsonc
+{
+  "analysis": "tabular",
+  "model_type": "feedforward",
+  "package": "pytorch",            // or "tensorflow"
+  "explainer_type": "kernel",       // "kernel" | "deep" | "gradient"
+  "model_path": "source/models/mlp.pt",
+  "dataset_path": "source/data/features.csv",
+  "background_data_path": "source/data/background.csv",  // optional
+  "feature_names": ["Wind_Speed", "Temp", "Humidity", "Pressure"],
+  "target_index": 0,
+  "kernel_nsamples": "auto",
+  "background_size": 100,
+  "output_dir": "output/"
+}
+```
 
 ---
 

@@ -1,3 +1,57 @@
+Metadata-Version: 2.4
+Name: ai-explainability
+Version: 0.3.0
+Summary: A standardized, model-agnostic toolbox for AI explainability using SHAP, with a focus on energy-sector workflows.
+Author-email: Bastien Giraud <bagir@dtu.dk>
+Maintainer-email: Bastien Giraud <bagir@dtu.dk>
+License: MIT
+Project-URL: Homepage, https://github.com/SavvinaFil/AI-Explainability
+Project-URL: Repository, https://github.com/SavvinaFil/AI-Explainability
+Project-URL: Issues, https://github.com/SavvinaFil/AI-Explainability/issues
+Keywords: shap,explainability,xai,machine-learning,energy,random-forest,lstm,arima
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: scipy>=1.10
+Requires-Dist: scikit-learn>=1.3
+Requires-Dist: shap>=0.44
+Requires-Dist: matplotlib>=3.7
+Requires-Dist: joblib>=1.3
+Requires-Dist: cloudpickle>=2.2
+Requires-Dist: tqdm>=4.65
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: nbformat>=5.9
+Requires-Dist: nbconvert>=7.0
+Requires-Dist: ipykernel>=6.20
+Requires-Dist: ipython>=8.10
+Provides-Extra: torch
+Requires-Dist: torch>=2.0; extra == "torch"
+Provides-Extra: tensorflow
+Requires-Dist: tensorflow>=2.12; extra == "tensorflow"
+Provides-Extra: grpc
+Requires-Dist: grpcio>=1.60; extra == "grpc"
+Requires-Dist: grpcio-tools>=1.60; extra == "grpc"
+Requires-Dist: protobuf>=4.24; extra == "grpc"
+Provides-Extra: spark
+Requires-Dist: pyspark>=3.4; extra == "spark"
+Provides-Extra: all
+Requires-Dist: ai-explainability[grpc,spark,tensorflow,torch]; extra == "all"
+Provides-Extra: dev
+Requires-Dist: build>=1.0; extra == "dev"
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: ruff>=0.3; extra == "dev"
+
 # 🛡️ AI Explainability Analysis Toolbox
 
 Various AI models excel at navigating the complexities of the energy transition, but their decisions often remain "black boxes." This toolbox strips away the mystery by providing a standardized, model-agnostic framework for AI explainability using SHAP. It transforms complex model behavior into auditable, physically grounded insights—ensuring that when an AI makes a high-stakes decision, you can trace it back to the fundamental drivers of the energy system.
