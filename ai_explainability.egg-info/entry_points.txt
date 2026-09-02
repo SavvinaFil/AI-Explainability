@@ -1,2 +1,0 @@
-[console_scripts]
-ai-explainability = ai_explainability:run
