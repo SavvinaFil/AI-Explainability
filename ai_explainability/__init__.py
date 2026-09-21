@@ -21,13 +21,17 @@ from __future__ import annotations
 
 from typing import Sequence
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",
     "run",
     "explain",
     "ExplanationResult",
+    "inspect_model",
+    "resolve_config",
+    "ModelProfile",
+    "FieldSpec",
 ]
 
 
@@ -71,6 +75,29 @@ def explain(*args, **kwargs):
     return _explain(*args, **kwargs)
 
 
+def inspect_model(*args, **kwargs):
+    """Forwarder to :func:`ai_explainability.introspect.inspect_model`.
+
+    Reads a fitted model (and optional labelled data), auto-fills the config
+    keys it can infer, and returns a :class:`ModelProfile` listing whatever the
+    caller still needs to supply. See the introspection module for detail.
+    """
+    from .introspect import inspect_model as _inspect
+
+    return _inspect(*args, **kwargs)
+
+
+def resolve_config(*args, **kwargs):
+    """Forwarder to :func:`ai_explainability.introspect.resolve_config`.
+
+    Merges a :class:`ModelProfile`'s inferred values with the caller's answers
+    into a config dict ready for :func:`explain` or ``config.json``.
+    """
+    from .introspect import resolve_config as _resolve
+
+    return _resolve(*args, **kwargs)
+
+
 def __getattr__(name: str):
     """Lazy attribute access for advanced users.
 
@@ -96,5 +123,12 @@ def __getattr__(name: str):
 
         globals()["ExplanationResult"] = _ER
         return _ER
+
+    if name in ("ModelProfile", "FieldSpec"):
+        from . import introspect as _intro
+
+        value = getattr(_intro, name)
+        globals()[name] = value
+        return value
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

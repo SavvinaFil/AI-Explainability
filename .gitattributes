@@ -1,0 +1,27 @@
+# Normalize line endings so a checkout on Windows (or a copy through OneDrive)
+# doesn't show the whole tree as "modified". Git stores LF; text files are
+# checked out with LF everywhere.
+* text=auto eol=lf
+
+# Explicitly treat source and docs as text.
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.cfg   text eol=lf
+*.ipynb text eol=lf
+*.proto text eol=lf
+
+# Binary / data files — never touch these.
+*.pkl   binary
+*.pt    binary
+*.pth   binary
+*.h5    binary
+*.keras binary
+*.xlsx  binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary

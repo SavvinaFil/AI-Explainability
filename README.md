@@ -156,6 +156,25 @@ result.save_excel("out.xlsx") # opt-in, only if you want disk output
 
 `save_excel` and `generate_notebook` default to `False` and `output_dir` is not auto-created, so a call like the one above touches zero files. Full walkthrough including a Unity Catalog + Delta example is in [`docs/databricks.md`](./docs/databricks.md).
 
+### 5. Auto-configuration (upload a model, let the toolbox fill in the config)
+
+Instead of hand-writing a config, hand the fitted model (and, ideally, a labelled DataFrame) to `inspect_model`. It reads the model's metadata — feature names, input width, number of outputs, framework — fills in every config key it can, and returns a list of the fields it still needs. A UI renders that list as a form; here we answer it in code:
+
+```python
+import ai_explainability as aie
+
+profile = aie.inspect_model(model, df)   # df's header supplies feature names
+print(profile.describe())                # inferred values + what's still needed
+
+# profile.missing is a list of form-field specs (key, prompt, type, options, default).
+answers = {"target_index": [0, 1, 2], "save_excel": False}
+
+config = aie.resolve_config(profile, answers)   # merge inferred + answers
+result = aie.explain(model=model, data=df, **config)
+```
+
+`inspect_model` supports scikit-learn / XGBoost, PyTorch, and TensorFlow/Keras, and `profile.to_dict()` is a JSON contract a front-end can consume directly. Step-by-step walkthroughs (which double as a UI spec) are in [`examples/notebooks/`](./examples/notebooks): `package_based_walkthrough.ipynb` (in-memory) and `file_based_walkthrough.ipynb` (upload files → `config.json` → CLI).
+
 #### Feedforward neural network (PyTorch or TensorFlow)
 Pass a fitted MLP and pick the SHAP backend with `explainer_type` (`kernel`, `gradient`, or `deep`). The `package` key selects the framework (auto-detected if omitted):
 
@@ -210,6 +229,7 @@ For detailed guides and tutorials, refer to our documentation suite:
 * **[Tutorial: Random Forest Regression](./docs/tutorials/tabular/dc_multioutput_regress.md):** A deep dive into training regression models and decoding the drivers behind continuous predictions.
 * **[Configuration Guide](./docs/configuration.md):** A complete technical breakdown of all `config.yaml` parameters and environment settings.
 * **[In-memory / Databricks Guide](./docs/databricks.md):** End-to-end walkthrough of the `ai_explainability.explain(...)` API for pipelines that don't want to touch disk.
+* **[Example notebooks](./examples/notebooks):** Step-by-step `inspect_model → resolve_config → run` walkthroughs — `package_based_walkthrough.ipynb` (in-memory) and `file_based_walkthrough.ipynb` (files + CLI). They double as the UI specification.
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
 
 
