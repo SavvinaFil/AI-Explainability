@@ -342,9 +342,15 @@ def _infer_outputs(model, framework, is_tree):
     """Return (n_outputs, is_classifier) as best we can."""
     is_classifier = hasattr(model, "predict_proba") or hasattr(model, "classes_")
 
-    # MultiOutput wrappers expose one estimator per target.
-    chain = " ".join(_class_chain(model)).lower()
-    if "multioutput" in chain and hasattr(model, "estimators_"):
+    # MultiOutput *wrappers* expose one estimator per target. Match the wrapper
+    # classes by name specifically — NOT a "multioutput" substring, because
+    # native sklearn forests inherit ``MultiOutputMixin`` and would otherwise be
+    # mistaken for wrappers (returning n_estimators instead of n_outputs).
+    wrapper_names = {"MultiOutputRegressor", "MultiOutputClassifier"}
+    is_wrapper = any(
+        name.rsplit(".", 1)[-1] in wrapper_names for name in _class_chain(model)
+    )
+    if is_wrapper and hasattr(model, "estimators_"):
         try:
             return len(model.estimators_), is_classifier
         except Exception:
