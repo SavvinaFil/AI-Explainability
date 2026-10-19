@@ -215,7 +215,8 @@ You can find examples of the jupyter notebooks here:
 
 ## 🛠️ Supported Models
 * Tree-Based: RandomForest, XGBoost, DecisionTrees (`model_type: "random_forest"`).
-* Feedforward / MLP: fully-connected networks trained with **PyTorch or TensorFlow/Keras** (`model_type: "feedforward"`). Choose the SHAP backend via `explainer_type`: `kernel`, `gradient`, or `deep`.
+* Feedforward / MLP: fully-connected networks trained with **PyTorch or TensorFlow/Keras** (`model_type: "feedforward"`). Choose the SHAP backend via `explainer_type`: `kernel`, `gradient`, or `deep`. Multi-output networks are fully supported.
+* Reinforcement-learning agents: policy / value networks (`model_type: "rl_policy"`). Every action output is explained — continuous setpoints and discrete action logits alike — and `result.chosen_output()` attributes the selected action. A plain callable policy wrapper is accepted for any RL framework. See the [RL tutorial](./docs/tutorials/rl/grid_rl_agent.md).
 * Deep Learning (time-series): LSTM (PyTorch) via `gradient` / `deep` SHAP.
 * Statistical (time-series): ARIMA / SARIMAX coefficient inspection.
 
@@ -230,6 +231,7 @@ For detailed guides and tutorials, refer to our documentation suite:
 * **[Configuration Guide](./docs/configuration.md):** A complete technical breakdown of all `config.yaml` parameters and environment settings.
 * **[In-memory / Databricks Guide](./docs/databricks.md):** End-to-end walkthrough of the `ai_explainability.explain(...)` API for pipelines that don't want to touch disk.
 * **[Example notebooks](./examples/notebooks):** Step-by-step `inspect_model → resolve_config → run` walkthroughs — `package_based_walkthrough.ipynb` (in-memory) and `file_based_walkthrough.ipynb` (files + CLI). They double as the UI specification.
+* **[Tutorial: RL grid agent](./docs/tutorials/rl/grid_rl_agent.md):** Explaining a reinforcement-learning control agent (continuous setpoints + discrete transformer taps), including the callable-wrapper pattern for any RL framework.
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
 
 

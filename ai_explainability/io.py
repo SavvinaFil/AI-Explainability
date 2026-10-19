@@ -256,9 +256,21 @@ def make_predict_fn(model: Any, framework: str | None = None):
 
         return _keras_predict
 
+    # Plain callable (e.g. a hand-written wrapper around an RL policy that maps
+    # a batch of observations to a 2D array of action-components). This is the
+    # framework-agnostic path — works with KernelExplainer, not deep/gradient.
+    if fw in {"callable", "function"} or (fw == "unknown" and callable(model)):
+
+        def _callable_predict(x):
+            out = np.asarray(model(np.asarray(x)))
+            return out.squeeze(-1) if out.ndim > 1 and out.shape[-1] == 1 else out
+
+        return _callable_predict
+
     raise ValueError(
         f"Cannot build a predict function for framework {fw!r}. "
-        "Pass package='pytorch' or package='tensorflow' in the config."
+        "Pass package='pytorch' / 'tensorflow', or supply a plain callable "
+        "obs(ndarray) -> values(ndarray)."
     )
 
 

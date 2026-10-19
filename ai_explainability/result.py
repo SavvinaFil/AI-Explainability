@@ -123,6 +123,48 @@ class ExplanationResult:
         return pd.concat(out, axis=1)
 
     # ------------------------------------------------------------------ #
+    # RL convenience: attribute the chosen (argmax) action                #
+    # ------------------------------------------------------------------ #
+    def chosen_output(self, among=None):
+        """Return the SHAP attribution of the *selected* action per sample.
+
+        For a discrete action head (e.g. transformer-tap positions represented
+        as several output columns), the agent picks ``argmax`` over those
+        outputs. This returns, for each state:
+
+        - ``chosen_idx`` — the output index the agent selected (shape ``(n,)``);
+        - ``chosen_shap`` — the SHAP values of that selected output
+          (shape ``(n, n_features)``), i.e. "why did it pick *this* action here".
+
+        Parameters
+        ----------
+        among:
+            The output indices that make up the discrete head to argmax over.
+            Defaults to every output present in ``predictions``. Pass a subset
+            when the network mixes continuous and discrete heads (select only
+            the discrete columns).
+        """
+        keys = list(among) if among is not None else sorted(self.predictions)
+        if not keys:
+            raise ValueError("No outputs available to choose among.")
+        missing = [k for k in keys if k not in self.predictions or k not in self.shap_values]
+        if missing:
+            raise ValueError(f"Outputs {missing} are not present in this result.")
+
+        pred_stack = np.column_stack(
+            [np.asarray(self.predictions[k]).ravel() for k in keys]
+        )
+        chosen_pos = pred_stack.argmax(axis=1)              # position within `keys`
+        chosen_idx = np.array([keys[p] for p in chosen_pos])
+
+        n = pred_stack.shape[0]
+        n_feat = np.asarray(self.shap_values[keys[0]]).shape[1]
+        chosen_shap = np.empty((n, n_feat), dtype=float)
+        for i, pos in enumerate(chosen_pos):
+            chosen_shap[i] = np.asarray(self.shap_values[keys[pos]])[i]
+        return chosen_idx, chosen_shap
+
+    # ------------------------------------------------------------------ #
     # Optional disk persistence                                          #
     # ------------------------------------------------------------------ #
     def save_excel(self, path: str | os.PathLike) -> str:

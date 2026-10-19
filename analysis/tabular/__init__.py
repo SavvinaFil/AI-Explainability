@@ -16,6 +16,11 @@ _MODEL_ROUTES = {
     "feedforward": ("analysis.tabular.neural", "FeedForwardExplainer"),
     "mlp": ("analysis.tabular.neural", "FeedForwardExplainer"),
     "neural_net": ("analysis.tabular.neural", "FeedForwardExplainer"),
+    # RL policy / value networks are feedforward nets with (possibly) multiple
+    # action outputs — same explainer, clearer names.
+    "rl_policy": ("analysis.tabular.neural", "FeedForwardExplainer"),
+    "policy": ("analysis.tabular.neural", "FeedForwardExplainer"),
+    "rl_agent": ("analysis.tabular.neural", "FeedForwardExplainer"),
 }
 
 
@@ -60,8 +65,9 @@ def run_tabular_analysis(config, *, model=None, data=None, background_data=None)
 
     # Only the neural explainer accepts a background_data kwarg. Build the
     # init kwargs dynamically so tree-based classes keep their simple signature.
+    _neural_types = {"feedforward", "mlp", "neural_net", "rl_policy", "policy", "rl_agent"}
     init_kwargs = {"model": model, "data": data}
-    if background_data is not None and model_type in {"feedforward", "mlp", "neural_net"}:
+    if background_data is not None and model_type in _neural_types:
         init_kwargs["background_data"] = background_data
 
     explainer = explainer_class(config, **init_kwargs)

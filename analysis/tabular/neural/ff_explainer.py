@@ -58,11 +58,17 @@ class FeedForwardExplainer(ExplainerBase):
         if self.framework in {"tf", "keras"}:
             self.framework = "tensorflow"
 
+        # A plain callable (e.g. a wrapper around an RL policy's heads) is a
+        # valid, framework-agnostic model — but it only supports KernelSHAP.
         if self.framework not in {"pytorch", "tensorflow"}:
-            raise ValueError(
-                "Could not determine the model framework. Set "
-                "config['package'] to 'pytorch' or 'tensorflow'."
-            )
+            if callable(self.model):
+                self.framework = "callable"
+            else:
+                raise ValueError(
+                    "Could not determine the model framework. Set "
+                    "config['package'] to 'pytorch' or 'tensorflow', or pass a "
+                    "plain callable obs(ndarray) -> values(ndarray)."
+                )
         print(f"Feedforward model ready ({self.framework}).")
 
     @staticmethod
@@ -88,6 +94,12 @@ class FeedForwardExplainer(ExplainerBase):
         from ai_explainability.io import make_predict_fn, to_pandas
 
         explainer_type = self.config.get("explainer_type", "kernel")
+        if self.framework == "callable" and explainer_type != "kernel":
+            raise ValueError(
+                f"explainer_type={explainer_type!r} needs a torch/keras model; a "
+                "plain callable only supports 'kernel'. Pass the underlying "
+                "nn.Module/keras model for deep/gradient, or use explainer_type='kernel'."
+            )
         if explainer_type not in self.SUPPORTED_EXPLAINERS:
             raise ValueError(
                 f"Unsupported explainer_type {explainer_type!r} for "
@@ -112,9 +124,28 @@ class FeedForwardExplainer(ExplainerBase):
         # 2. Build a background / baseline distribution appropriate to the backend.
         background = self._resolve_background(X, explainer_type)
 
-        # 3. Dispatch on explainer type.
+        # 3. Predict once to learn the output width (= number of action
+        #    components for an RL policy) and capture per-output predictions.
+        predict_fn = make_predict_fn(self.model, self.framework)
+        preds_all = np.asarray(predict_fn(X))
+        if preds_all.ndim == 1:
+            preds_all = preds_all.reshape(-1, 1)
+        n_outputs = preds_all.shape[1]
+        self.n_outputs = n_outputs
+
+        # Which outputs (actions / setpoints) to explain. Default: all of them.
+        targets = self.config.get("target_index")
+        if targets is None:
+            targets = list(range(n_outputs))
+        elif isinstance(targets, (int, np.integer)):
+            targets = [int(targets)]
+        else:
+            targets = [int(t) for t in targets]
+
+        # 4. Compute SHAP once, then split into one 2D array per output. This is
+        #    framework- and action-type-agnostic: continuous setpoints and
+        #    discrete logits are both just output columns.
         if explainer_type == "kernel":
-            predict_fn = make_predict_fn(self.model, self.framework)
             explainer = shap.KernelExplainer(predict_fn, background)
             nsamples = self.config.get("kernel_nsamples", "auto")
             shap_raw = explainer.shap_values(X, nsamples=nsamples)
@@ -129,15 +160,22 @@ class FeedForwardExplainer(ExplainerBase):
             )
             shap_raw = explainer.shap_values(self._as_framework_tensor(X))
 
-        # 4. Normalise to a 2D array (n_samples, n_features).
-        self.all_shap_values = {0: self._normalise_shap(shap_raw)}
+        per_output = self._split_outputs(shap_raw, n_outputs)
 
-        # 5. Predictions for the result object.
-        preds = make_predict_fn(self.model, self.framework)(X)
-        self.all_predictions = {0: np.asarray(preds).reshape(len(X), -1)[:, 0]}
+        # 5. Keep only the requested outputs.
+        self.all_shap_values = {}
+        self.all_predictions = {}
+        for idx in targets:
+            if idx not in per_output:
+                raise ValueError(
+                    f"target_index {idx} is out of range for a model with "
+                    f"{n_outputs} output(s)."
+                )
+            self.all_shap_values[idx] = per_output[idx]
+            self.all_predictions[idx] = preds_all[:, idx]
 
         # Compatibility for the notebook generator.
-        self.shap_values = self.all_shap_values[0]
+        self.shap_values = self.all_shap_values[targets[0]]
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -189,12 +227,36 @@ class FeedForwardExplainer(ExplainerBase):
         return np.asarray(arr, dtype="float32")
 
     @staticmethod
-    def _normalise_shap(shap_raw):
-        """Collapse SHAP output to a single 2D (n_samples, n_features) array.
+    def _split_outputs(shap_raw, n_outputs):
+        """Split a SHAP result into ``{output_idx: (n_samples, n_features)}``.
 
-        Handles: bare 2D ndarray (regression), list of arrays (classification —
-        keep class 1 / positive), 3D ``(n, feat, n_outputs)`` (keep output 1 for
-        binary, else output 0), and a trailing singleton axis.
+        Handles the shapes SHAP returns for multi-output models:
+
+        - list of arrays (one per output) — kernel/deep/gradient on multi-output;
+        - 3D ndarray ``(n, feat, n_outputs)`` — some SHAP versions;
+        - 2D ndarray — a single-output model.
+
+        A trailing singleton output axis is squeezed.
+        """
+        if isinstance(shap_raw, list):
+            out = {i: np.asarray(a) for i, a in enumerate(shap_raw)}
+            # Squeeze any trailing singleton feature axis per entry.
+            return {i: (a[..., 0] if a.ndim == 3 and a.shape[-1] == 1 else a)
+                    for i, a in out.items()}
+        arr = np.asarray(shap_raw)
+        if arr.ndim == 3:
+            if arr.shape[-1] == 1:
+                return {0: arr[:, :, 0]}
+            return {i: arr[:, :, i] for i in range(arr.shape[2])}
+        # 2D — single output.
+        return {0: arr}
+
+    @staticmethod
+    def _normalise_shap(shap_raw):
+        """Collapse SHAP output to a single 2D array (legacy convenience).
+
+        Retained for callers/tests that want a single-output view; the explainer
+        itself now uses :meth:`_split_outputs` to keep every output.
         """
         if isinstance(shap_raw, list):
             arr = shap_raw[1] if len(shap_raw) > 1 else shap_raw[0]
@@ -202,7 +264,6 @@ class FeedForwardExplainer(ExplainerBase):
             arr = shap_raw
         arr = np.asarray(arr)
         if arr.ndim == 3:
-            # (n, feat, n_outputs) — pick positive class for binary, else first.
             arr = arr[:, :, 1] if arr.shape[-1] > 1 else arr[:, :, 0]
         return arr
 
@@ -230,21 +291,34 @@ class FeedForwardExplainer(ExplainerBase):
         import os
         from datetime import datetime
 
+        import pandas as pd
+
         self.ensure_output_dir()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"shap_audit_{self.config.get('model_type', 'feedforward')}_{timestamp}.xlsx"
         output_path = os.path.join(self.output_dir, filename)
 
-        shap_arr = self.all_shap_values[0]
-        preds = self.all_predictions.get(0)
         df_features = self.raw_data.reset_index(drop=True)
-        sheet = df_features.copy()
-        if preds is not None:
-            sheet["Model_Prediction"] = np.asarray(preds).ravel()[: len(sheet)]
-        for j, name in enumerate(self.raw_data.columns):
-            if j < shap_arr.shape[1]:
-                sheet[f"SHAP_{name}"] = shap_arr[:, j]
-        sheet.to_excel(output_path, index=False)
+        output_labels = self.config.get("output_labels", {})
+
+        with pd.ExcelWriter(output_path) as writer:
+            for idx, shap_arr in self.all_shap_values.items():
+                # Name the sheet after the action/output if labels were provided.
+                label = None
+                if isinstance(output_labels, dict):
+                    label = output_labels.get(str(idx)) or output_labels.get(idx)
+                elif isinstance(output_labels, (list, tuple)) and idx < len(output_labels):
+                    label = output_labels[idx]
+                sheet_name = str(label) if label else f"output_{idx}"
+
+                sheet = df_features.copy()
+                preds = self.all_predictions.get(idx)
+                if preds is not None:
+                    sheet["Model_Prediction"] = np.asarray(preds).ravel()[: len(sheet)]
+                for j, name in enumerate(self.raw_data.columns):
+                    if j < shap_arr.shape[1]:
+                        sheet[f"SHAP_{name}"] = shap_arr[:, j]
+                sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
         print(f"Feedforward SHAP audit saved: {output_path}")
 
     def plot_results(self):

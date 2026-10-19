@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-10-17
+
+### Added
+- **Reinforcement-learning / multi-output policy support** in the feedforward
+  explainer.
+  - `FeedForwardExplainer` now explains **every output** of a network (honoring
+    `target_index` for a subset), returning one SHAP array per output. This
+    covers RL policy nets with multiple action components — continuous setpoints
+    (P/Q) and discrete tap logits are handled identically.
+  - `model` may be a **plain callable** `obs(ndarray) -> values(ndarray)` (wrap
+    any framework's policy heads into one 2D array); KernelSHAP only.
+  - `ExplanationResult.chosen_output(among=[...])` attributes the **argmax
+    (selected) action** per state — "why did the agent pick this action here".
+  - `save_results_to_excel` writes one sheet per action, named via `output_labels`.
+  - New model_type aliases `rl_policy` / `policy` / `rl_agent` (→ feedforward).
+- Tutorial: `docs/tutorials/rl/grid_rl_agent.md` — explaining a power-grid RL
+  agent, including the callable-wrapper integration pattern and `chosen_output`.
+
+### Changed
+- The feedforward explainer no longer collapses a multi-output model to a single
+  output. A 2-logit classifier that previously returned only "class 1" now
+  returns both outputs by default (pass `target_index` to select).
+
+## [0.4.1] - 2026-10-17
+
+### Changed
+- `explain()` now prints a one-line reminder when a run produced no files
+  (neither `save_excel` nor `generate_notebook` was set), pointing to the flags
+  and `result.save_excel()` / `result.save_notebook()`. Silence it with the
+  `AI_EXPLAINABILITY_QUIET=1` environment variable. This addresses confusion
+  where an in-memory run appears to "do nothing" (no files, no error).
+
+### Notes
+- Report outputs are a SHAP audit (`.xlsx`) and an executed Jupyter report
+  (`.ipynb`). There is no PDF output. `test_in_memory_local.py` now includes an
+  end-to-end example that writes and verifies both.
+
 ## [0.4.0] - 2026-09-21
 
 ### Added

@@ -211,17 +211,48 @@ def explain(
     if analysis == "tabular":
         from analysis.tabular import run_tabular_analysis
 
-        return run_tabular_analysis(
+        result = run_tabular_analysis(
             config, model=model, data=data, background_data=background_data
         )
+    else:  # timeseries
+        from analysis.timeseries import run_timeseries_analysis
 
-    # timeseries
-    from analysis.timeseries import run_timeseries_analysis
+        result = run_timeseries_analysis(
+            config,
+            model=model,
+            background_data=background_data,
+            test_data=test_data,
+            data=data,
+        )
 
-    return run_timeseries_analysis(
-        config,
-        model=model,
-        background_data=background_data,
-        test_data=test_data,
-        data=data,
+    # Gentle reminder: a pure in-memory run writes nothing. Many users expect a
+    # report/audit file and are surprised when none appears (there's no error,
+    # by design). Print a one-line hint when neither output was requested.
+    _maybe_remind_no_outputs(save_excel, generate_notebook, result)
+    return result
+
+
+def _maybe_remind_no_outputs(save_excel: bool, generate_notebook: bool, result) -> None:
+    """Print a one-line reminder when a run produced no files.
+
+    Silenced by setting the environment variable ``AI_EXPLAINABILITY_QUIET`` to
+    a truthy value, so automated pipelines can opt out of the message.
+    """
+    import os
+
+    if save_excel or generate_notebook:
+        return  # the user asked for outputs; the explainer prints their paths.
+    if result is None:
+        return  # nothing to report on.
+    if os.environ.get("AI_EXPLAINABILITY_QUIET", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return
+
+    print(
+        "[ai_explainability] Ran in memory — no files were written. "
+        "To save outputs, either pass save_excel=True / generate_notebook=True "
+        "(+ output_dir) to explain(), or call result.save_excel('audit.xlsx') / "
+        "result.save_notebook('report.ipynb'). "
+        "(Set AI_EXPLAINABILITY_QUIET=1 to silence this message.)"
     )
