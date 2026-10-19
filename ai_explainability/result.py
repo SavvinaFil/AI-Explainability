@@ -164,6 +164,27 @@ class ExplanationResult:
             chosen_shap[i] = np.asarray(self.shap_values[keys[pos]])[i]
         return chosen_idx, chosen_shap
 
+    def chosen_actions(self, heads: Mapping[str, Any]):
+        """Apply :meth:`chosen_output` to several discrete heads at once.
+
+        For an agent with multiple discrete action heads (e.g. a categorical P,
+        a categorical Q, and a categorical transformer tap), pass a mapping of
+        head name -> the output indices (logit columns) that belong to it:
+
+        >>> result.chosen_actions({
+        ...     "P":   [0, 1, 2],      # P over 3 levels
+        ...     "Q":   [3, 4, 5],      # Q over 3 levels
+        ...     "tap": [6, 7, 8, 9],   # tap over 4 positions
+        ... })
+
+        Returns ``{head_name: (chosen_idx, chosen_shap)}``, where for each head
+        ``chosen_idx`` is the selected category (as an output index) per state
+        and ``chosen_shap`` is the SHAP of that selection — i.e. "why did the
+        agent pick this P / Q / tap here". Works for any number of heads and any
+        mix of head sizes; a continuous action is simply a head with one index.
+        """
+        return {name: self.chosen_output(among=list(cols)) for name, cols in heads.items()}
+
     # ------------------------------------------------------------------ #
     # Optional disk persistence                                          #
     # ------------------------------------------------------------------ #

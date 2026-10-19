@@ -203,7 +203,7 @@ Install the matching extra if the framework isn't already present: `pip install 
 The toolbox generates two primary artifacts in the output/ folder:
 
 1. SHAP Audit (.xlsx): A multi-sheet spreadsheet containing original feature values, model predictions, and SHAP values for every row. Each target index gets its own sheet.
-2. Interpretation Report (.ipynb): A fully executed Jupyter Notebook containing Summary Plots, Feature Importance Bar Charts, and Temporal Analysis (for LSTMs).
+2. Interpretation Report (.ipynb): A Jupyter Notebook containing Summary Plots, Feature Importance Bar Charts, and Temporal Analysis (for LSTMs). By default it is saved ready-to-run (open it and "Run All" to render the plots); pass `execute_notebook=True` to pre-render them. Execution runs in an isolated subprocess so a kernel/zmq failure can never crash your analysis.
 
 You can find examples of the jupyter notebooks here:
 

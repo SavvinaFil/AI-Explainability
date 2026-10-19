@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-10-19
+
+### Fixed
+- Silenced the benign sklearn "KMeans is known to have a memory leak on Windows
+  with MKL" UserWarning emitted when the feedforward/RL kernel-SHAP path
+  summarizes the background set with `shap.kmeans`. The message is filtered only
+  around that call; correctness is unchanged.
+
+## [0.6.1] - 2026-10-19
+
+### Fixed
+- Notebook report generation could crash the **entire host process** with a
+  native fault (`EXCEPTION_ACCESS_VIOLATION` in pyzmq/libzmq) on some Windows
+  setups, because the notebook was executed in-process via a Jupyter kernel and
+  a native crash cannot be caught by Python. Now:
+  - the `.ipynb` is written to disk **before** any execution, so it always
+    exists;
+  - execution is **opt-in** via `execute_notebook=True` (default `False`) — by
+    default a ready-to-run notebook is saved with code cells, which you open and
+    "Run All";
+  - when enabled, execution runs in an **isolated subprocess** (`jupyter
+    nbconvert --execute`), so a kernel/zmq crash is contained and the unexecuted
+    notebook is still delivered with a clear message.
+
+### Changed
+- The Jupyter report is no longer pre-executed by default (set
+  `execute_notebook=True` to pre-render plots). The Excel audit is unaffected.
+
+## [0.6.0] - 2026-10-19
+
+### Added
+- `ExplanationResult.chosen_actions(heads)` — apply the chosen-action (argmax)
+  view to several discrete heads at once, e.g.
+  `{"P": [0,1,2], "Q": [3,4,5], "tap": [6,7,8,9]}`, returning
+  `{head: (chosen_idx, chosen_shap)}`. Supports agents whose action space is any
+  mix of continuous and discrete heads (including fully discrete P/Q/tap).
+- RL tutorial: section on fully-discrete multi-head agents.
+
+## [0.5.1] - 2026-10-19
+
+### Fixed
+- Notebook report generation no longer hardcodes `kernel_name='python3'`, which
+  caused `Warning: Execution failed. Error: No such kernel named python3` and a
+  report saved **without rendered plots** in environments where no `python3`
+  kernel spec is registered. `report_gen` now picks an available kernel (prefers
+  `python3`, else any registered kernel), best-effort registers the current
+  interpreter if none exists, and prints an actionable message if execution is
+  still not possible. The `.ipynb` is always written either way.
+
 ## [0.5.0] - 2026-10-17
 
 ### Added

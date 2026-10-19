@@ -209,7 +209,19 @@ class FeedForwardExplainer(ExplainerBase):
 
         if explainer_type == "kernel":
             try:
-                return shap.kmeans(X, k)  # DenseData summary — kernel only
+                import warnings
+
+                with warnings.catch_warnings():
+                    # sklearn's KMeans emits a benign MKL memory-leak UserWarning
+                    # on Windows when there are fewer chunks than threads. It
+                    # doesn't affect the summary, so silence just that message
+                    # (setting OMP_NUM_THREADS at runtime wouldn't help — MKL
+                    # reads it at init).
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*KMeans is known to have a memory leak.*",
+                    )
+                    return shap.kmeans(X, k)  # DenseData summary — kernel only
             except Exception:
                 pass  # fall through to a plain row sample
         idx = np.random.RandomState(0).choice(len(X), k, replace=False)

@@ -1,5 +1,4 @@
 import nbformat as nbf
-from nbconvert.preprocessors import ExecutePreprocessor
 import os
 import numpy as np
 import asyncio
@@ -7,6 +6,88 @@ import sys
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def _resolve_kernel_name():
+    """Return a usable Jupyter kernel name, registering one if necessary.
+
+    Hardcoding ``kernel_name='python3'`` fails in environments where no kernel
+    spec is registered under that name (common with fresh installs or named
+    conda envs). We prefer ``python3`` when present, fall back to any registered
+    kernel, and as a last resort register the current interpreter. Returns
+    ``None`` if no kernel can be made available (the notebook is then saved
+    unexecuted rather than crashing).
+    """
+    try:
+        from jupyter_client.kernelspec import KernelSpecManager
+
+        specs = KernelSpecManager().find_kernel_specs()
+    except Exception:
+        specs = {}
+
+    if "python3" in specs:
+        return "python3"
+    if specs:
+        return next(iter(specs))
+
+    # Nothing registered — best-effort: register the running interpreter.
+    try:
+        import subprocess
+
+        subprocess.run(
+            [sys.executable, "-m", "ipykernel", "install", "--user", "--name", "python3"],
+            check=True,
+            capture_output=True,
+        )
+        return "python3"
+    except Exception:
+        return None
+
+
+def _execute_notebook_isolated(nb_path, timeout=600):
+    """Execute a notebook in a SEPARATE process and update it in place.
+
+    Running execution out-of-process (via the ``jupyter nbconvert`` CLI) means a
+    native crash in the kernel/zmq stack — e.g. the libzmq access violation seen
+    on some Windows setups — is contained to the child process instead of killing
+    the caller. Returns ``True`` on success; on any failure the on-disk notebook
+    is left unexecuted (but still runnable) and a short message is printed.
+    """
+    import subprocess
+
+    kernel = _resolve_kernel_name()
+    cmd = [
+        sys.executable, "-m", "jupyter", "nbconvert",
+        "--to", "notebook", "--execute", "--inplace", nb_path,
+        f"--ExecutePreprocessor.timeout={timeout}",
+    ]
+    if kernel:
+        cmd += ["--ExecutePreprocessor.kernel_name", kernel]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout + 120
+        )
+    except Exception as e:  # launch failure / timeout
+        print(f"Warning: could not execute the notebook ({type(e).__name__}: {e}).")
+        return False
+
+    if proc.returncode == 0:
+        print("Notebook executed (plots rendered).")
+        return True
+
+    # Non-zero / abnormal exit — includes a contained native crash.
+    detail = ""
+    if proc.stderr:
+        lines = [ln for ln in proc.stderr.strip().splitlines() if ln.strip()]
+        if lines:
+            detail = f" Last line: {lines[-1][:160]}"
+    print(
+        "Warning: notebook execution failed in an isolated subprocess "
+        f"(exit code {proc.returncode}).{detail}"
+    )
+    return False
+
 
 def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_path=None, all_shap_values=None):
     output_dir = os.path.dirname(output_path)
@@ -222,15 +303,30 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
             f"plt.show()"
         ))
 
-    # 5. Execution and Saving
+    # 5. Save first, then (optionally) execute OUT-OF-PROCESS.
+    #
+    # Writing the notebook before any execution guarantees the file exists even
+    # if execution fails. Execution spins up a Jupyter kernel over pyzmq, which
+    # on some platforms (notably Windows) can crash the *host* process with a
+    # native fault (EXCEPTION_ACCESS_VIOLATION in libzmq) that Python cannot
+    # catch. So execution is (a) opt-in via config['execute_notebook'] and
+    # (b) run in an isolated subprocess, so such a crash is contained and the
+    # unexecuted — but perfectly runnable — notebook is still delivered.
     nb['cells'] = cells
-    ep = ExecutePreprocessor(timeout=600, kernel_name='python3')
-    try:
-        ep.preprocess(nb, {'metadata': {'path': os.path.dirname(os.path.abspath(output_path))}})
-    except Exception as e:
-        print(f"Warning: Execution failed. Error: {e}")
-
     with open(output_path, 'w', encoding='utf-8') as f:
         nbf.write(nb, f)
 
-    print(f"Notebook generated successfully: {output_path}")
+    if explainer_inst.config.get("execute_notebook", False):
+        ok = _execute_notebook_isolated(output_path)
+        if not ok:
+            print(
+                "  (The notebook was saved WITHOUT rendered plots — open it in "
+                "Jupyter and 'Run All' to render them.)"
+            )
+    else:
+        print(
+            "Notebook saved (code cells, not executed). Open it and 'Run All' to "
+            "render plots, or pass execute_notebook=True to pre-render."
+        )
+
+    print(f"Notebook generated: {output_path}")

@@ -88,6 +88,53 @@ output *is* the action.
 
 ---
 
+## 3b. Fully discrete agents with several heads (P, Q, and tap all discrete)
+
+The toolbox works for **any combination** of continuous and discrete outputs,
+because it explains the network's output *columns* regardless of how they're
+interpreted. The only rule is how an action maps to columns:
+
+- a **continuous** action = **one** output column;
+- a **discrete** action = a **group** of output columns (one logit per category);
+  `argmax` over that group is the chosen category.
+
+So if the agent chooses discrete P (say 3 levels), discrete Q (3 levels) and a
+discrete tap (4 positions), the network outputs `3 + 3 + 4 = 10` logit columns.
+Tell the toolbox which columns form each head and get the chosen category + its
+attribution per head in one call:
+
+```python
+# column layout of the policy output, fixed by your wrapper:
+#   0,1,2  -> P levels      3,4,5 -> Q levels      6,7,8,9 -> tap positions
+ACTIONS = {
+    "0": "P_low", "1": "P_mid", "2": "P_high",
+    "3": "Q_low", "4": "Q_mid", "5": "Q_high",
+    "6": "tap_0", "7": "tap_1", "8": "tap_2", "9": "tap_3",
+}
+
+result = aie.explain(
+    model=policy_predict, data=states, analysis="tabular",
+    model_type="rl_policy", package="callable", explainer_type="kernel",
+    feature_names=OBS, output_labels=ACTIONS, background_size=100,
+)
+
+chosen = result.chosen_actions({
+    "P":   [0, 1, 2],
+    "Q":   [3, 4, 5],
+    "tap": [6, 7, 8, 9],
+})
+
+chosen["P"]    # (idx_per_state, shap_per_state) — which P level, and why
+chosen["Q"]    # same for Q
+chosen["tap"]  # same for tap
+```
+
+`chosen_actions` just applies `chosen_output` to each head, so it scales to any
+number of heads and any head sizes. A continuous head is simply a head with one
+index (no argmax needed — the output is the action).
+
+---
+
 ## 4. If your policy isn't a plain `nn.Module`
 
 RL frameworks (Maze, Stable-Baselines3, RLlib, custom) often wrap the network so
@@ -117,10 +164,10 @@ result = aie.explain(
 )
 ```
 
-The wrapper is the only integration code EnliteAI needs to write. It also fixes
+The wrapper is the only integration code that needs to be written. It also fixes
 the **column order**, which is what `target_index` and `output_labels` refer to.
 
-- For a **Gaussian continuous policy**, return the action **mean** (what the agent
+- For a **continuous policy**, return the action **mean** (what the agent
   would deploy).
 - For **discrete heads**, return the **logits** (pre-softmax); `argmax` matches the
   action taken, and `chosen_output` then attributes it.
@@ -155,6 +202,3 @@ result = aie.explain(..., save_excel=True, generate_notebook=True, output_dir="o
 result.save_excel("grid_agent_audit.xlsx")
 result.save_notebook("grid_agent_report.ipynb")
 ```
-
-A runnable end-to-end version of this example (block 13) is in
-[`test_in_memory_local.py`](../../../test_in_memory_local.py).
