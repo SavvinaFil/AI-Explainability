@@ -83,6 +83,8 @@ Place your trained model and the dataset you want to explain in the `source/` di
 ### 2. Configure your Analysis
 Create a JSON file to define the analysis scope. This file tells the toolbox where your files are and how to interpret the outputs.
 
+> **You don't have to hand-write all of this.** The config below is the full file-based form. If you work in memory (section 4) you only pass a few arguments, and `inspect_model` (section 5) can auto-detect most of them from the model and your data's header. Reach for the full `config.json` only when you want the file-based CLI.
+
 <details>
 <summary><b>Example: Tabular Multi-Target Regression (config.json)</b></summary>
 
@@ -156,6 +158,8 @@ result.save_excel("out.xlsx") # opt-in, only if you want disk output
 
 `save_excel` and `generate_notebook` default to `False` and `output_dir` is not auto-created, so a call like the one above touches zero files. Full walkthrough including a Unity Catalog + Delta example is in [`docs/databricks.md`](./docs/databricks.md).
 
+You don't have to specify every argument: `feature_names` are read from the DataFrame header automatically, and `model_type` / `package` can be auto-detected (see *Auto-configuration* below). For models with many features, trim the plots and result tables with `top_features=N` (the N most important, per output) or `select_features=[...]` (an explicit list) — the raw `result.shap_values` stay full-size.
+
 ### 5. Auto-configuration (upload a model, let the toolbox fill in the config)
 
 Instead of hand-writing a config, hand the fitted model (and, ideally, a labelled DataFrame) to `inspect_model`. It reads the model's metadata — feature names, input width, number of outputs, framework — fills in every config key it can, and returns a list of the fields it still needs. A UI renders that list as a form; here we answer it in code:
@@ -204,6 +208,7 @@ The toolbox generates two primary artifacts in the output/ folder:
 
 1. SHAP Audit (.xlsx): A multi-sheet spreadsheet containing original feature values, model predictions, and SHAP values for every row. Each target index gets its own sheet.
 2. Interpretation Report (.ipynb): A Jupyter Notebook containing Summary Plots, Feature Importance Bar Charts, and Temporal Analysis (for LSTMs). By default it is saved ready-to-run (open it and "Run All" to render the plots); pass `execute_notebook=True` to pre-render them. Execution runs in an isolated subprocess so a kernel/zmq failure can never crash your analysis.
+3. HTML Report (.html) — **recommended, kernel-free**: `result.save_report_html("report.html")` produces the **same sections as the notebook** (beeswarm, importance bar, temporal for LSTMs, top-5 drivers — both reports share `output/utils/report_content.py`), rendered directly with matplotlib and embedded in one self-contained file. No Jupyter kernel is involved, so it can't hit the kernel/zmq problems that affect `.ipynb` rendering on some Windows setups, and it handles multi-output / RL policies cleanly (one section per action). See [`output/report_rl_agent_example.html`](./output/report_rl_agent_example.html) for a sample.
 
 You can find examples of the jupyter notebooks here:
 
@@ -232,6 +237,7 @@ For detailed guides and tutorials, refer to our documentation suite:
 * **[In-memory / Databricks Guide](./docs/databricks.md):** End-to-end walkthrough of the `ai_explainability.explain(...)` API for pipelines that don't want to touch disk.
 * **[Example notebooks](./examples/notebooks):** Step-by-step `inspect_model → resolve_config → run` walkthroughs — `package_based_walkthrough.ipynb` (in-memory) and `file_based_walkthrough.ipynb` (files + CLI). They double as the UI specification.
 * **[Tutorial: RL grid agent](./docs/tutorials/rl/grid_rl_agent.md):** Explaining a reinforcement-learning control agent (continuous setpoints + discrete transformer taps), including the callable-wrapper pattern for any RL framework.
+* **[Tutorial: Tree-based forecasting](./docs/tutorials/tabular/tree_based_forecast.md):** Explaining a RandomForest/XGBoost forecaster, trimming many-feature outputs with `top_features` / `select_features`, per-output drivers, and a glossary of every config term (`target_index`, `output_labels`, …).
 * **[Explainability Theory](./docs/theory.md):** A detailed exploration of the mathematical foundations of Shapley Additive Explanations (SHAP).
 
 

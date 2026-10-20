@@ -193,12 +193,28 @@ you can pass the raw network.
 
 ## 6. Saving a report
 
-By default an in-memory run writes nothing. To get the Excel audit (one sheet per
-action) and the executed Jupyter report:
+By default an in-memory run writes nothing. For an RL policy with many action
+outputs, the **kernel-free HTML report** is recommended — it renders directly
+with matplotlib (no Jupyter kernel, so it can't hit the kernel/zmq crashes seen
+on some Windows setups) and gives one section per action:
+
+```python
+result.save_report_html(
+    "output/grid_agent_report.html",
+    output_labels=labels,   # names each action logit, e.g. "P_gen1=L0"
+    max_outputs=None,       # cap sections if the policy has many logits
+)
+```
+
+See [`output/report_rl_agent_example.html`](../../../output/report_rl_agent_example.html)
+for a sample of this report on the all-discrete structure.
+
+The Excel audit (one sheet per action) and the Jupyter notebook are also
+available:
 
 ```python
 result = aie.explain(..., save_excel=True, generate_notebook=True, output_dir="output/")
 # or, after the fact:
 result.save_excel("grid_agent_audit.xlsx")
-result.save_notebook("grid_agent_report.ipynb")
+result.save_notebook("grid_agent_report.ipynb")   # ready-to-run; execute_notebook=True to pre-render
 ```

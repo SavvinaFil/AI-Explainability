@@ -273,6 +273,27 @@ class LSTMExplainer(TimeseriesExplainerBase):
         shap_flat = shap_array.reshape(shap_array.shape[0], -1)
         data_flat = self.raw_data_values.reshape(self.raw_data_values.shape[0], -1)
 
+        # Trim to selected / top features when requested. ``select_features``
+        # matches on the BASE feature name (keeps all time-steps of that
+        # feature); ``top_features`` keeps the strongest flattened columns.
+        base_per_col = [feat for _i in range(look_back) for feat in features]
+        sf = self.config.get("select_features")
+        tf = self.config.get("top_features")
+        if sf:
+            sel = [j for j, b in enumerate(base_per_col) if b in set(sf)]
+            sel = sel or list(range(len(flat_cols_shap)))
+        elif tf:
+            from output.utils.report_content import select_feature_indices
+
+            sel = select_feature_indices(shap_flat, flat_cols_shap, top_features=tf)
+        else:
+            sel = list(range(len(flat_cols_shap)))
+
+        shap_flat = shap_flat[:, sel]
+        data_flat = data_flat[:, sel]
+        flat_cols_shap = [flat_cols_shap[j] for j in sel]
+        flat_cols_data = [flat_cols_data[j] for j in sel]
+
         shap_df = pd.DataFrame(shap_flat, columns=flat_cols_shap)
         data_df = pd.DataFrame(data_flat, columns=flat_cols_data)
 

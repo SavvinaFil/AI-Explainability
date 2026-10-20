@@ -64,6 +64,25 @@ class ExplanationResult:
     analysis: str = ""
     model_type: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
+    # Feature trimming for views/reports (does NOT alter the full arrays in
+    # ``shap_values`` — only what to_dataframe / save_excel / reports render).
+    # ``select_features``: explicit list of feature names to keep.
+    # ``top_features``: keep the N most important features, computed per output.
+    select_features: list[str] | None = None
+    top_features: int | None = None
+
+    # ------------------------------------------------------------------ #
+    # Feature selection helper                                            #
+    # ------------------------------------------------------------------ #
+    def _selected_indices(self, shap_2d, names):
+        """Column indices to keep for one output, honoring select/top_features."""
+        from output.utils.report_content import select_feature_indices
+
+        return select_feature_indices(
+            shap_2d, names,
+            top_features=self.top_features,
+            select_features=self.select_features,
+        )
 
     # ------------------------------------------------------------------ #
     # Views                                                              #
@@ -88,7 +107,20 @@ class ExplanationResult:
         features = self.feature_names or [
             f"f{i}" for i in range(arr.shape[1])
         ]
-        base = pd.DataFrame(arr, columns=features)
+
+        # Per-output selected feature indices (honors select/top_features).
+        selected = {
+            idx: self._selected_indices(np.asarray(sa), features)
+            for idx, sa in self.shap_values.items()
+            if np.asarray(sa).ndim == 2
+        }
+        # Raw feature columns: union of all selected features (keeps the table
+        # narrow when top_features/select_features trims the set).
+        if selected:
+            keep = sorted({j for idxs in selected.values() for j in idxs})
+        else:
+            keep = list(range(len(features)))
+        base = pd.DataFrame(arr[:, keep], columns=[features[j] for j in keep])
 
         for idx, preds in self.predictions.items():
             base[f"Model_Prediction_{idx}"] = np.asarray(preds).ravel()[: len(base)]
@@ -96,8 +128,8 @@ class ExplanationResult:
         for idx, shap_arr in self.shap_values.items():
             sa = np.asarray(shap_arr)
             if sa.ndim == 2 and sa.shape[1] == len(features):
-                for j, name in enumerate(features):
-                    base[f"SHAP_{name}_t{idx}"] = sa[:, j]
+                for j in selected.get(idx, range(len(features))):
+                    base[f"SHAP_{features[j]}_t{idx}"] = sa[:, j]
         return base
 
     def _flatten_3d(self) -> pd.DataFrame:
@@ -217,19 +249,21 @@ class ExplanationResult:
                         axis=1,
                     )
                 else:  # tabular 2D
-                    features = list(self.raw_data.columns) if self.raw_data is not None else self.feature_names
+                    features = list(self.raw_data.columns) if self.raw_data is not None else list(self.feature_names)
+                    # Trim to selected / top features for this output.
+                    sel = self._selected_indices(sa, features) if sa.ndim == 2 else list(range(len(features)))
                     df_features = (
                         self.raw_data.reset_index(drop=True)
                         if self.raw_data is not None
                         else pd.DataFrame(self.raw_data_values, columns=features)
                     )
+                    sheet_df = df_features.iloc[:, sel].copy()
                     preds_series = self.predictions.get(idx)
-                    sheet_df = df_features.copy()
                     if preds_series is not None:
                         sheet_df["Model_Prediction"] = np.asarray(preds_series).ravel()[: len(sheet_df)]
-                    for j, name in enumerate(features):
+                    for j in sel:
                         if sa.ndim == 2 and j < sa.shape[1]:
-                            sheet_df[f"SHAP_{name}"] = sa[:, j]
+                            sheet_df[f"SHAP_{features[j]}"] = sa[:, j]
 
                 sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
@@ -260,6 +294,11 @@ class ExplanationResult:
         shim.config.setdefault("analysis", self.analysis)
         shim.config.setdefault("model_type", self.model_type)
         shim.config.setdefault("feature_names", self.feature_names)
+        # Carry feature trimming into the notebook generator.
+        if self.top_features is not None:
+            shim.config.setdefault("top_features", self.top_features)
+        if self.select_features is not None:
+            shim.config.setdefault("select_features", self.select_features)
         shim.all_shap_values = self.shap_values
         shim.shap_values = next(iter(self.shap_values.values()), None)
         shim.raw_data_values = self.raw_data_values
@@ -270,6 +309,174 @@ class ExplanationResult:
             raw_data=self.raw_data_values,
             output_path=path,
         )
+        return os.path.abspath(path)
+
+    def save_report_html(
+        self,
+        path: str | os.PathLike,
+        *,
+        output_labels: Any = None,
+        max_outputs: int | None = None,
+        title: str = "SHAP Interpretation Report",
+    ) -> str:
+        """Render a self-contained HTML report — **no Jupyter kernel required**.
+
+        This produces the SAME sections as the ``.ipynb`` report (beeswarm,
+        global importance bar, temporal relevance for LSTMs, and top-5 drivers,
+        with identical narrative text), because both reports draw their plots and
+        wording from ``output.utils.report_content``. The difference is only the
+        delivery: plots are rendered in-process with matplotlib and embedded as
+        base64 PNGs, so no Jupyter kernel is launched and the pyzmq/kernel
+        failures that can affect the notebook cannot occur. Recommended for
+        multi-output / RL policies and for Windows users.
+
+        Parameters
+        ----------
+        output_labels:
+            Optional ``{idx: name}`` dict or list to title each output section.
+        max_outputs:
+            Cap the number of output sections rendered. ``None`` renders all.
+        """
+        import base64
+        import html as _html
+        import io as _io
+
+        import matplotlib
+        matplotlib.use("Agg")  # headless — no display / no kernel
+        import matplotlib.pyplot as plt
+
+        from output.utils import report_content as rc
+
+        path = str(path)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+        out_keys = sorted(self.shap_values)
+        if max_outputs is not None:
+            out_keys = out_keys[:max_outputs]
+
+        def _label(idx):
+            if isinstance(output_labels, dict):
+                return str(output_labels.get(str(idx)) or output_labels.get(idx) or f"output_{idx}")
+            if isinstance(output_labels, (list, tuple)) and idx < len(output_labels):
+                return str(output_labels[idx])
+            return f"output_{idx}"
+
+        def _flatten(idx):
+            """Return (shap_2d, data_2d, names, raw_3d_or_None, look_back)."""
+            sv = np.asarray(self.shap_values[idx])
+            rd = self.raw_data_values
+            if sv.ndim == 3:  # LSTM (n, look_back, feat)
+                n, lb, nf = sv.shape
+                feats = self.feature_names or [f"f{i}" for i in range(nf)]
+                names = [f"{f}_t-{lb - 1 - k}" for k in range(lb) for f in feats]
+                data2 = np.asarray(rd).reshape(n, -1) if rd is not None else None
+                return sv.reshape(n, -1), data2, names, sv, lb
+            feats = self.feature_names or [f"f{i}" for i in range(sv.shape[1])]
+            data2 = np.asarray(rd) if rd is not None else None
+            return sv, data2, list(feats), None, None
+
+        def _b64(fig):
+            buf = _io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+            plt.close(fig)
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+
+        def _md(text):
+            """Tiny markdown -> HTML for the shared narrative strings."""
+            out, bullets = [], []
+            for line in text.split("\n"):
+                line = line.strip()
+                while "**" in line:
+                    line = line.replace("**", "<strong>", 1).replace("**", "</strong>", 1)
+                line = line.replace("`", "<code>", 1).replace("`", "</code>", 1) if line.count("`") >= 2 else line
+                if line.startswith("* "):
+                    bullets.append(f"<li>{line[2:]}</li>")
+                else:
+                    if bullets:
+                        out.append("<ul>" + "".join(bullets) + "</ul>"); bullets = []
+                    if line:
+                        out.append(f"<p>{line}</p>")
+            if bullets:
+                out.append("<ul>" + "".join(bullets) + "</ul>")
+            return "".join(out)
+
+        def _plot_block(title_txt, text, fig):
+            return (f'<div class="plot"><h3>{_html.escape(title_txt)}</h3>'
+                    f'{_md(text)}<img src="data:image/png;base64,{_b64(fig)}"/></div>')
+
+        toc, sections = [], []
+        for idx in out_keys:
+            s_flat, d_flat, names, raw3d, look_back = _flatten(idx)
+            # Trim to the selected / top features for this output.
+            sel = self._selected_indices(s_flat, names)
+            if len(sel) != len(names):
+                s_flat = s_flat[:, sel]
+                d_flat = d_flat[:, sel] if d_flat is not None else None
+                names = [names[j] for j in sel]
+                # Temporal plot needs the 3D array; skip it when trimming an LSTM
+                # (time-step aggregation spans all features), to avoid confusion.
+                raw3d = None if raw3d is not None else raw3d
+            label = _label(idx)
+            blocks = [
+                _plot_block(rc.BEESWARM_TITLE, rc.BEESWARM_TEXT,
+                            rc.fig_beeswarm(s_flat, d_flat, names, f"Impact Distribution: {label}")),
+                _plot_block(rc.BAR_TITLE, rc.BAR_TEXT,
+                            rc.fig_bar(s_flat, d_flat, names, f"Mean Influence: {label}")),
+            ]
+            if raw3d is not None:
+                blocks.append(_plot_block(rc.TEMPORAL_TITLE, rc.TEMPORAL_TEXT,
+                                          rc.fig_temporal(raw3d, look_back, f"Temporal Relevance: {label}")))
+            blocks.append(_plot_block(rc.TOP5_TITLE, rc.TOP5_TEXT,
+                                      rc.fig_top5(s_flat, names, f"Top 5 Drivers: {label}")))
+            anchor = f"out{idx}"
+            toc.append(f'<li><a href="#{anchor}">{_html.escape(label)}</a></li>')
+            sections.append(f'<section id="{anchor}"><h2>Analysis for: {_html.escape(label)}</h2>'
+                            + "".join(blocks) + "</section>")
+
+        n_samples = (np.asarray(self.raw_data_values).shape[0]
+                     if self.raw_data_values is not None else "?")
+        meta = (f"analysis: <b>{_html.escape(self.analysis)}</b> &nbsp;&middot;&nbsp; "
+                f"model: <b>{_html.escape(self.model_type)}</b> &nbsp;&middot;&nbsp; "
+                f"outputs: <b>{len(out_keys)}</b> &nbsp;&middot;&nbsp; "
+                f"samples: <b>{n_samples}</b> &nbsp;&middot;&nbsp; "
+                f"generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        intro = (
+            "<p><strong>SHAP (SHapley Additive exPlanations)</strong> decomposes each "
+            "prediction into the contribution of every input feature. A positive SHAP "
+            "value pushes the output higher; a negative one pushes it lower. Each "
+            "section below explains one model output.</p>"
+        )
+        html_doc = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>{_html.escape(title)}</title>
+<style>
+ body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;color:#1f2d3d;background:#fff}}
+ header{{background:#2c3e50;color:#fff;padding:20px 28px}}
+ header h1{{margin:0 0 6px;font-size:22px}} header .meta{{font-size:13px;color:#cfd8e3}}
+ .wrap{{max-width:900px;margin:0 auto;padding:24px 28px}}
+ .intro{{font-size:14px;color:#334155;margin-bottom:18px}}
+ nav{{background:#f5f7fa;border:1px solid #e2e8f0;border-radius:8px;padding:12px 18px;margin-bottom:24px}}
+ nav h3{{margin:0 0 8px;font-size:13px;text-transform:uppercase;color:#64748b}}
+ nav ul{{columns:3;margin:0;padding-left:18px;font-size:13px}}
+ section{{border-top:2px solid #e2e8f0;padding:18px 0}}
+ section h2{{font-size:18px;margin:0 0 12px;color:#2c3e50}}
+ .plot{{margin:14px 0}} .plot h3{{font-size:15px;margin:0 0 4px}}
+ .plot p{{margin:4px 0;font-size:13px;color:#475569}} .plot ul{{margin:4px 0 8px 18px;font-size:13px;color:#475569}}
+ .plot img{{max-width:100%;width:640px;border:1px solid #edf0f3;border-radius:6px;display:block;margin-top:8px}}
+ footer{{color:#94a3b8;font-size:12px;padding:16px 28px;border-top:1px solid #e2e8f0}}
+</style></head>
+<body>
+<header><h1>{_html.escape(title)}</h1><div class="meta">{meta}</div></header>
+<div class="wrap">
+<div class="intro">{intro}</div>
+<nav><h3>Outputs</h3><ul>{''.join(toc)}</ul></nav>
+{''.join(sections)}
+</div>
+<footer>Generated by ai-explainability &middot; kernel-free HTML report (same sections as the .ipynb report).</footer>
+</body></html>"""
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html_doc)
         return os.path.abspath(path)
 
     # ------------------------------------------------------------------ #

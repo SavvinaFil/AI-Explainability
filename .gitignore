@@ -1,6 +1,8 @@
 # Ignore the multi-output classification examples
 # examples/tabular/multioutput_classify/
 docs/tutorials/tabular/dc_multioutput_classify.md
+docs/tutorials/tabular/dc_multioutput_regress.md
+docs/tutorials/tabular/dc_binary_classify.md
 .idea/
 __pycache__/
 AI_explainability.proto

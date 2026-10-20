@@ -76,12 +76,18 @@ def _build_config(
     look_back: int | None,
     look_ahead: int | None,
     extras: Mapping[str, Any],
+    top_features: int | None = None,
+    select_features: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the legacy-style config dict the explainers still consume."""
     cfg: dict[str, Any] = {
         "analysis": analysis,
         "model_type": model_type,
     }
+    if top_features is not None:
+        cfg["top_features"] = int(top_features)
+    if select_features is not None:
+        cfg["select_features"] = list(select_features)
     if package is not None:
         # Framework selector for neural explainers ("pytorch" / "tensorflow").
         cfg["package"] = package
@@ -143,6 +149,9 @@ def explain(
     hidden_size: int | None = None,
     look_back: int | None = None,
     look_ahead: int | None = None,
+    # Output trimming (great for models with many features) --------------- #
+    top_features: int | None = None,
+    select_features: Sequence[str] | None = None,
     **extras: Any,
 ):
     """Run an explainability analysis on an in-memory model and dataset.
@@ -204,6 +213,8 @@ def explain(
         hidden_size=hidden_size,
         look_back=look_back,
         look_ahead=look_ahead,
+        top_features=top_features,
+        select_features=select_features,
         extras=filtered_extras,
     )
 
@@ -224,6 +235,14 @@ def explain(
             test_data=test_data,
             data=data,
         )
+
+    # Carry the feature-trimming choice onto the result so its views/reports
+    # (to_dataframe, save_excel, save_report_html, save_notebook) honor it.
+    if result is not None:
+        if top_features is not None:
+            result.top_features = int(top_features)
+        if select_features is not None:
+            result.select_features = list(select_features)
 
     # Gentle reminder: a pure in-memory run writes nothing. Many users expect a
     # report/audit file and are surprised when none appears (there's no error,

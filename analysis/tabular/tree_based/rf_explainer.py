@@ -219,10 +219,19 @@ class RFExplainer(ExplainerBase):
                     if preds.ndim > 1:
                         preds = preds[:, idx]
 
-                df_features = self.raw_data.reset_index(drop=True)
+                # Trim to selected / top features (per target) when requested.
+                from output.utils.report_content import select_feature_indices
+
+                cols = list(self.raw_data.columns)
+                sel = select_feature_indices(
+                    shap_arr, cols,
+                    top_features=self.config.get("top_features"),
+                    select_features=self.config.get("select_features"),
+                )
+                df_features = self.raw_data.reset_index(drop=True).iloc[:, sel]
                 df_preds = pd.DataFrame({"Model_Prediction": preds})
                 df_shap = pd.DataFrame(
-                    shap_arr, columns=[f"SHAP_{c}" for c in self.raw_data.columns]
+                    shap_arr[:, sel], columns=[f"SHAP_{cols[j]}" for j in sel]
                 )
 
                 sheet_df = pd.concat([df_features, df_preds, df_shap], axis=1)

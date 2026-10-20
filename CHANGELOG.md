@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-20
+
+### Added
+- **Feature selection** to trim large outputs: `aie.explain(..., top_features=N)`
+  keeps the N most important features (by mean |SHAP|, **per output**), and
+  `select_features=[...]` keeps an explicit subset. Trimming flows through
+  `to_dataframe()`, `save_excel()`, `save_report_html()`, the notebook report,
+  **and the config-driven Excel writers of all explainers** (tree, feedforward,
+  LSTM) — plots and result tables both shrink. The raw `result.shap_values`
+  arrays are left full-width (trimming only affects the views). For multi-output
+  models each output keeps its own top features. Settable on the result too
+  (`result.top_features` / `result.select_features`).
+- Tutorial `docs/tutorials/tabular/tree_based_forecast.md` — explaining a
+  tree-based forecasting model, including feature selection, per-output drivers,
+  and a glossary of every config term (`target_index`, `feature_names`,
+  `output_labels`, `model_type`, …).
+
+### Fixed
+- Silenced a benign `FutureWarning` ("The NumPy global RNG was seeded …") emitted
+  from inside `shap.summary_plot` during report generation. Filtered only around
+  the shap call, scoped so it doesn't affect other warnings.
+
+### Docs
+- Rewrote `docs/tutorials/timeseries/lstm.md` in the tutorial style (in-memory
+  first, `inspect_model` auto-config, feature selection, glossary), and updated
+  `docs/databricks.md` + `README.md` to note that the full `config.json` is
+  optional (the in-memory API + `inspect_model` infer most parameters) and to
+  document `top_features` / `select_features` and the kernel-free HTML report.
+
+## [0.7.0] - 2026-10-20
+
+### Added
+- `ExplanationResult.save_report_html(path, ...)` — a **kernel-free** HTML report
+  with the **same layout** as the `.ipynb` report (beeswarm, global importance
+  bar, temporal relevance for LSTMs, top-5 drivers, and identical narrative
+  text). Both reports now draw their plots and wording from a shared module,
+  `output/utils/report_content.py`, so they stay in sync. The HTML report renders
+  in-process with matplotlib and embeds base64 PNGs, so no Jupyter kernel is
+  launched and the pyzmq/kernel failures that affect the notebook cannot occur —
+  making it the recommended report for multi-output / RL policies and Windows.
+  Supports `output_labels` (name each action logit) and `max_outputs`.
+- Sample report `output/report_rl_agent_example.html` showing the EnliteAI
+  all-discrete multi-head structure (23 action logits).
+
+### Changed
+- The notebook report generator (`report_gen.py`) now uses the shared
+  `report_content` plot/text helpers instead of inline code, so the `.ipynb` and
+  `.html` reports are guaranteed to have an identical layout.
+
 ## [0.6.2] - 2026-10-19
 
 ### Fixed

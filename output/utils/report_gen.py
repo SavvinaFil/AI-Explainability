@@ -1,5 +1,7 @@
 import nbformat as nbf
 import os
+
+from . import report_content as rc
 import numpy as np
 import asyncio
 import sys
@@ -103,6 +105,8 @@ def generate_notebook(explainer_inst, shap_values=None, raw_data=None, output_pa
     features = config.get("feature_names", [])
     look_back = config.get("look_back", 1)
     output_labels = config.get("output_labels", {})
+    top_features = config.get("top_features", None)
+    select_features = config.get("select_features", None)
     is_timeseries = (
         config.get("analysis") == "timeseries"
         and raw_data is not None
@@ -182,6 +186,10 @@ if sys.platform == "win32":
     code_setup = f"""import shap
 import numpy as np
 import matplotlib.pyplot as plt
+# Shared plot helpers — the HTML report (save_report_html) uses these exact
+# functions too, so both reports produce an identical layout.
+from output.utils.report_content import fig_beeswarm, fig_bar, fig_temporal, fig_top5
+from output.utils.report_content import select_feature_indices
 
 # Load data from companion .npz file — avoids MemoryError for large datasets
 _data = np.load(r"{data_file}", allow_pickle=True)
@@ -196,6 +204,8 @@ feature_names = {features}
 look_back = {look_back}
 is_timeseries = {is_timeseries}
 output_labels = {output_labels}
+top_features = {top_features!r}
+select_features = {select_features!r}
 
 def get_flattened_data(shap_data):
     if is_timeseries:
@@ -205,7 +215,13 @@ def get_flattened_data(shap_data):
     else:
         shap_flat = shap_data
         data_flat = data_raw
-        flat_names = feature_names
+        flat_names = list(feature_names)
+    # Trim to selected / top features (per output) — keeps big outputs readable.
+    sel = select_feature_indices(shap_flat, flat_names, top_features=top_features, select_features=select_features)
+    if len(sel) != len(flat_names):
+        shap_flat = shap_flat[:, sel]
+        data_flat = data_flat[:, sel] if data_flat is not None else data_flat
+        flat_names = [flat_names[i] for i in sel]
     return shap_flat, data_flat, flat_names
 
 print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
@@ -236,70 +252,38 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
         cells.append(nbf.v4.new_markdown_cell(f"## Analysis for Target: `{label}`\n---"))
 
         # PLOT 1: BEESWARM
-        cells.append(nbf.v4.new_markdown_cell(f"""### 1. Feature Impact Distribution (Beeswarm)
-**What is this?** A distribution of SHAP values for every sample in the dataset.
-**What to focus on:**
-* **Horizontal Position:** Points to the right increase the model output; points to the left decrease it.
-* **Color:** Represents the feature value (**Red** is high, **Blue** is low).
-* **Insight:** If Red points are on the right, the feature has a positive correlation with the target."""))
+        cells.append(nbf.v4.new_markdown_cell(f"### {rc.BEESWARM_TITLE}\n\n{rc.BEESWARM_TEXT}"))
 
         cells.append(nbf.v4.new_code_cell(
             f"current_shap_raw = np.array(all_shap_dict[{repr(target_idx)}])\n"
             f"s_flat, d_flat, names = get_flattened_data(current_shap_raw)\n"
-            f"plt.figure(figsize=(10, 6))\n"
-            f"shap.summary_plot(s_flat, d_flat, feature_names=names, show=False)\n"
-            f'plt.title("Impact Distribution: {label}", fontsize=14, pad=20)\n'
+            f'fig_beeswarm(s_flat, d_flat, names, "Impact Distribution: {label}")\n'
             f"plt.show()"
         ))
 
         # PLOT 2: BAR CHART
-        cells.append(nbf.v4.new_markdown_cell(f"""### 2. Global Feature Importance
-**What is this?** The mean absolute SHAP value for each feature.
-**What to focus on:** The length of the bar represents the global influence of a feature — how much it moves the prediction on average, regardless of direction."""))
+        cells.append(nbf.v4.new_markdown_cell(f"### {rc.BAR_TITLE}\n\n{rc.BAR_TEXT}"))
 
         cells.append(nbf.v4.new_code_cell(
-            f"plt.figure(figsize=(10, 6))\n"
-            f"shap.summary_plot(s_flat, d_flat, feature_names=names, plot_type='bar', show=False, color='#34495e')\n"
-            f'plt.title("Mean Influence: {label}", fontsize=14, pad=20)\n'
-            f"plt.grid(axis='x', linestyle='--', alpha=0.6)\n"
+            f'fig_bar(s_flat, d_flat, names, "Mean Influence: {label}")\n'
             f"plt.show()"
         ))
 
         # PLOT 3: TEMPORAL (Optional — LSTM only)
         if is_timeseries:
-            cells.append(nbf.v4.new_markdown_cell(f"""### 3. Temporal Relevance
-**What is this?** A look at which time-steps in the `{look_back}` window are most influential.
-**What to focus on:** Does the model care more about the immediate past (`t-0`, `t-1`) or older history?"""))
+            cells.append(nbf.v4.new_markdown_cell(f"### {rc.TEMPORAL_TITLE}\n\n{rc.TEMPORAL_TEXT}"))
 
             cells.append(nbf.v4.new_code_cell(
                 f"current_shap_raw = np.array(all_shap_dict[{repr(target_idx)}])\n"
-                f"importance_per_step = np.abs(current_shap_raw).mean(axis=(0, 2)).flatten()\n"
-                f"time_labels = [f't-{{i}}' for i in range({look_back}-1, -1, -1)]\n"
-                f"time_axis = list(range(len(time_labels)))\n"
-                f"plt.figure(figsize=(10, 4))\n"
-                f"plt.plot(time_axis, importance_per_step, marker='o', linewidth=2, color='#e67e22')\n"
-                f"plt.xticks(time_axis, time_labels)\n"
-                f'plt.title("Temporal Relevance: {label}", fontsize=14)\n'
-                f"plt.xlabel('Timeline (History -> Present)')\n"
-                f"plt.fill_between(time_axis, importance_per_step, alpha=0.1, color='#e67e22')\n"
-                f"plt.grid(True, alpha=0.3)\n"
+                f'fig_temporal(current_shap_raw, {look_back}, "Temporal Relevance: {label}")\n'
                 f"plt.show()"
             ))
 
         # PLOT 4: TOP 5 DRIVERS
-        cells.append(nbf.v4.new_markdown_cell(f"""### 4. Focused View: Top 5 Drivers
-**What is this?** A high-precision look at the five most critical variables for `{label}`.
-**What to focus on:** The gap between the 1st and 5th feature. If the 1st is much larger, the model is heavily reliant on a single variable."""))
+        cells.append(nbf.v4.new_markdown_cell(f"### {rc.TOP5_TITLE}\n\n{rc.TOP5_TEXT}"))
 
         cells.append(nbf.v4.new_code_cell(
-            f"mean_shap = np.abs(s_flat).mean(axis=0)\n"
-            f"sorted_idx = np.argsort(mean_shap)[-5:]\n"
-            f"plt.figure(figsize=(10, 5))\n"
-            f"plt.barh([names[i] for i in sorted_idx], mean_shap[sorted_idx], color='#2c3e50')\n"
-            f'plt.title("Top 5 Drivers: {label}", fontsize=14)\n'
-            f"for i, v in enumerate(mean_shap[sorted_idx]):\n"
-            f"    plt.text(v, i, f'  {{v:.4f}}', va='center', fontweight='bold')\n"
-            f"plt.tight_layout()\n"
+            f'fig_top5(s_flat, names, "Top 5 Drivers: {label}")\n'
             f"plt.show()"
         ))
 

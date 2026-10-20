@@ -310,7 +310,10 @@ class FeedForwardExplainer(ExplainerBase):
         filename = f"shap_audit_{self.config.get('model_type', 'feedforward')}_{timestamp}.xlsx"
         output_path = os.path.join(self.output_dir, filename)
 
+        from output.utils.report_content import select_feature_indices
+
         df_features = self.raw_data.reset_index(drop=True)
+        cols = list(self.raw_data.columns)
         output_labels = self.config.get("output_labels", {})
 
         with pd.ExcelWriter(output_path) as writer:
@@ -323,13 +326,19 @@ class FeedForwardExplainer(ExplainerBase):
                     label = output_labels[idx]
                 sheet_name = str(label) if label else f"output_{idx}"
 
-                sheet = df_features.copy()
+                # Trim to selected / top features (per output) when requested.
+                sel = select_feature_indices(
+                    shap_arr, cols,
+                    top_features=self.config.get("top_features"),
+                    select_features=self.config.get("select_features"),
+                )
+                sheet = df_features.iloc[:, sel].copy()
                 preds = self.all_predictions.get(idx)
                 if preds is not None:
                     sheet["Model_Prediction"] = np.asarray(preds).ravel()[: len(sheet)]
-                for j, name in enumerate(self.raw_data.columns):
+                for j in sel:
                     if j < shap_arr.shape[1]:
-                        sheet[f"SHAP_{name}"] = shap_arr[:, j]
+                        sheet[f"SHAP_{cols[j]}"] = shap_arr[:, j]
                 sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
         print(f"Feedforward SHAP audit saved: {output_path}")
 

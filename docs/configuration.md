@@ -73,6 +73,8 @@ The requirement for background data shifts based on your chosen `explainer_type`
 | `input_dim` | The number of features per time step. |
 | `explain_subset` | (LSTM) How many samples to explain. Defaults to `50`. |
 | `kernel_nsamples` | (Feedforward, KernelSHAP) Coalition-sampling budget. Defaults to `"auto"`. |
+| `top_features` | Keep only the N most important features (by mean \|SHAP\|, per output) in the plots and result tables. Useful for models with many features. |
+| `select_features` | Keep exactly this list of feature names in the plots and result tables (takes precedence over `top_features`). |
 | `background_size` | (Feedforward) Rows to summarise into a background set when no explicit background is given. Defaults to `100`. |
 | `dataset_scope` | Usually set to `whole` to ensure scaling context is maintained across the entire project. |
 | `generate_notebook` | If `true`, exports a `.ipynb` file for interactive post-run analysis. |
