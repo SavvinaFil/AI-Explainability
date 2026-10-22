@@ -133,6 +133,14 @@ class FeedForwardExplainer(ExplainerBase):
         n_outputs = preds_all.shape[1]
         self.n_outputs = n_outputs
 
+        # Per-sample targets (RL): explain only the selected output(s) per
+        # sample instead of every output column.
+        if self.config.get("targets") is not None:
+            self._explain_selected_targets(
+                X, background, explainer_type, preds_all, predict_fn
+            )
+            return
+
         # Which outputs (actions / setpoints) to explain. Default: all of them.
         targets = self.config.get("target_index")
         if targets is None:
@@ -145,21 +153,7 @@ class FeedForwardExplainer(ExplainerBase):
         # 4. Compute SHAP once, then split into one 2D array per output. This is
         #    framework- and action-type-agnostic: continuous setpoints and
         #    discrete logits are both just output columns.
-        if explainer_type == "kernel":
-            explainer = shap.KernelExplainer(predict_fn, background)
-            nsamples = self.config.get("kernel_nsamples", "auto")
-            shap_raw = explainer.shap_values(X, nsamples=nsamples)
-        elif explainer_type == "gradient":
-            explainer = shap.GradientExplainer(
-                self.model, self._as_framework_tensor(background)
-            )
-            shap_raw = explainer.shap_values(self._as_framework_tensor(X))
-        else:  # "deep"
-            explainer = shap.DeepExplainer(
-                self.model, self._as_framework_tensor(background)
-            )
-            shap_raw = explainer.shap_values(self._as_framework_tensor(X))
-
+        shap_raw = self._run_shap(self.model, predict_fn, background, X, explainer_type)
         per_output = self._split_outputs(shap_raw, n_outputs)
 
         # 5. Keep only the requested outputs.
@@ -176,6 +170,267 @@ class FeedForwardExplainer(ExplainerBase):
 
         # Compatibility for the notebook generator.
         self.shap_values = self.all_shap_values[targets[0]]
+
+    def _run_shap(self, model, predict_fn, background, X, explainer_type):
+        """Build the requested SHAP backend and return its raw output for ``X``."""
+        if explainer_type == "gradient" and self.framework == "pytorch":
+            n_outputs = int(np.asarray(predict_fn(X[:1])).reshape(1, -1).shape[1])
+            cols = np.broadcast_to(np.arange(n_outputs), (len(X), n_outputs))
+            return list(self._expected_gradients_torch(model, background, X, cols).transpose(2, 0, 1))
+        if explainer_type == "kernel":
+            explainer = shap.KernelExplainer(predict_fn, background)
+            nsamples = self.config.get("kernel_nsamples", "auto")
+            return explainer.shap_values(X, nsamples=nsamples)
+        if explainer_type == "gradient":
+            explainer = shap.GradientExplainer(
+                model, self._as_framework_tensor(background)
+            )
+        else:  # "deep"
+            explainer = shap.DeepExplainer(
+                model, self._as_framework_tensor(background)
+            )
+        return explainer.shap_values(self._as_framework_tensor(X))
+
+    # ------------------------------------------------------------------ #
+    # Per-sample targets (explain only the action taken)                  #
+    # ------------------------------------------------------------------ #
+    def _resolve_target_heads(self, n_outputs):
+        """Normalise ``config['targets']`` to ``{head_name: [output indices]}``."""
+        targets = self.config["targets"]
+        if isinstance(targets, str):
+            if targets != "argmax":
+                raise ValueError(
+                    f"targets must be 'argmax' or a {{head: [output indices]}} "
+                    f"mapping; got {targets!r}."
+                )
+            return {"argmax": list(range(n_outputs))}
+        if not isinstance(targets, dict) or not targets:
+            raise ValueError(
+                "targets must be 'argmax' or a non-empty {head: [output indices]} mapping."
+            )
+        heads = {}
+        for name, cols in targets.items():
+            cols = [int(c) for c in (cols if hasattr(cols, "__iter__") else [cols])]
+            if not cols:
+                raise ValueError(f"Head {name!r} has no output indices.")
+            bad = [c for c in cols if not 0 <= c < n_outputs]
+            if bad:
+                raise ValueError(
+                    f"Head {name!r} references outputs {bad}, but the model has "
+                    f"{n_outputs} output(s)."
+                )
+            heads[str(name)] = cols
+        return heads
+
+    def _resolve_families(self, head_names):
+        """Return ``{output_name: [head names]}`` — one output per head unless summed.
+
+        With ``targets_reduce='sum'`` the heads listed in each
+        ``target_families`` entry are collapsed into one output; heads not
+        listed in any family stay as their own output.
+        """
+        reduce = self.config.get("targets_reduce")
+        if reduce is None:
+            return {h: [h] for h in head_names}
+        if reduce != "sum":
+            raise ValueError(f"targets_reduce must be None or 'sum'; got {reduce!r}.")
+        families = self.config.get("target_families")
+        if not families:
+            raise ValueError(
+                "targets_reduce='sum' needs target_families={family: [head names]}."
+            )
+        out, seen = {}, set()
+        for fam, members in families.items():
+            members = [str(m) for m in members]
+            unknown = [m for m in members if m not in head_names]
+            if unknown:
+                raise ValueError(f"Family {fam!r} references unknown heads {unknown}.")
+            dup = [m for m in members if m in seen]
+            if dup:
+                raise ValueError(f"Heads {dup} appear in more than one family.")
+            seen.update(members)
+            out[str(fam)] = members
+        for h in head_names:
+            if h not in seen:
+                if h in out:
+                    raise ValueError(
+                        f"Family name {h!r} collides with a head that is not in any family."
+                    )
+                out[h] = [h]
+        return out
+
+    def _selection_model(self, S):
+        """Wrap the model so it returns ``model(x) @ S`` (the selected outputs).
+
+        ``S`` is a fixed ``(n_outputs, n_selected)`` 0/1 matrix, so the wrapper
+        is linear in the logits and every SHAP backend handles it exactly.
+        """
+        if self.framework == "pytorch":
+            import torch
+
+            class _SelectOutputs(torch.nn.Module):
+                def __init__(self, base, sel):
+                    super().__init__()
+                    self.base = base
+                    self.register_buffer("sel", torch.as_tensor(sel, dtype=torch.float32))
+
+                def forward(self, x):
+                    return self.base(x) @ self.sel
+
+            return _SelectOutputs(self.model, S).eval()
+        if self.framework == "tensorflow":
+            import tensorflow as tf
+
+            # A frozen bias-free Dense layer instead of tf.linalg.matmul: raw TF
+            # ops cannot be applied to KerasTensors under Keras 3 (TF >= 2.16).
+            proj = tf.keras.layers.Dense(S.shape[1], use_bias=False, trainable=False)
+            out = proj(self.model.output)
+            proj.set_weights([np.asarray(S, dtype="float32")])
+            return tf.keras.Model(inputs=self.model.inputs, outputs=out)
+        return None  # callable: only the kernel path, via the predict fn.
+
+    def _explain_selected_targets(self, X, background, explainer_type, preds_all, base_predict):
+        """Explain, per sample, only the output each head actually selected.
+
+        The argmax of every head is computed once on ``X`` (no gradients).
+        Samples are then grouped by their chosen-index tuple and SHAP runs once
+        per group on a wrapped model that returns only those logits (or their
+        per-family sums). The selection is therefore fixed per explained
+        sample, never re-derived on SHAP's perturbed or interpolated inputs.
+        """
+        n_outputs = preds_all.shape[1]
+        heads = self._resolve_target_heads(n_outputs)
+        head_names = list(heads)
+        families = self._resolve_families(head_names)
+        fam_names = list(families)
+        head_pos = {h: i for i, h in enumerate(head_names)}
+
+        # (n, n_heads) original output index chosen by each head.
+        chosen = np.column_stack(
+            [np.asarray(heads[h])[preds_all[:, heads[h]].argmax(axis=1)] for h in head_names]
+        )
+
+        n, n_feat = X.shape
+        shap_out = {f: np.zeros((n, n_feat), dtype=float) for f in fam_names}
+        pred_out = {f: np.zeros(n, dtype=float) for f in fam_names}
+
+        self.chosen_index = {h: chosen[:, head_pos[h]] for h in head_names}
+        self.target_heads = heads
+        self.target_families = families
+
+        if explainer_type == "gradient" and self.framework == "pytorch":
+            # The choice travels with each sample, so every sample is explained in one batched run instead of one
+            # SHAP run per distinct action combination.
+            fam_matrix = np.zeros((len(head_names), len(fam_names)), dtype="float32")
+            for j, fam in enumerate(fam_names):
+                for h in families[fam]:
+                    fam_matrix[head_pos[h], j] = 1.0
+            phi = self._expected_gradients_torch(self.model, background, X, chosen, fam_matrix)
+            sel_preds = np.take_along_axis(preds_all, chosen, axis=1) @ fam_matrix
+            for j, fam in enumerate(fam_names):
+                shap_out[fam] = phi[:, :, j]
+                pred_out[fam] = sel_preds[:, j]
+            self.all_shap_values = shap_out
+            self.all_predictions = pred_out
+            self.n_groups = 1
+            print(f"Explained {len(fam_names)} selected output(s) instead of {n_outputs} "
+                  f"(one batched expected-gradients run over {n} sample(s)).")
+            self.shap_values = self.all_shap_values[fam_names[0]]
+            return
+
+        groups, inverse = np.unique(chosen, axis=0, return_inverse=True)
+        inverse = np.asarray(inverse).ravel()
+        for g, combo in enumerate(groups):
+            rows = np.flatnonzero(inverse == g)
+            S = np.zeros((n_outputs, len(fam_names)), dtype="float32")
+            for j, fam in enumerate(fam_names):
+                for h in families[fam]:
+                    # += so two heads in one family picking the same column count twice.
+                    S[combo[head_pos[h]], j] += 1.0
+
+            def predict_fn(x, _S=S):
+                p = np.asarray(base_predict(x))
+                return (p.reshape(len(p), -1) @ _S).astype("float32")
+
+            model = None if explainer_type == "kernel" else self._selection_model(S)
+            shap_raw = self._run_shap(model, predict_fn, background, X[rows], explainer_type)
+            per_output = self._split_outputs(shap_raw, len(fam_names))
+            sel_preds = preds_all[rows] @ S
+            for j, fam in enumerate(fam_names):
+                shap_out[fam][rows] = np.asarray(per_output[j]).reshape(len(rows), n_feat)
+                pred_out[fam][rows] = sel_preds[:, j]
+
+        self.all_shap_values = shap_out
+        self.all_predictions = pred_out
+        self.n_groups = len(groups)
+        print(
+            f"Explained {len(fam_names)} selected output(s) instead of {n_outputs} "
+            f"({len(groups)} distinct action combination(s))."
+        )
+        self.shap_values = self.all_shap_values[fam_names[0]]
+
+    def _expected_gradients_torch(self, model, background, X, cols, fam_matrix=None):
+        """Batched expected gradients (the estimator behind ``shap.GradientExplainer``) for PyTorch.
+
+        For every sample ``x`` it draws ``gradient_nsamples`` background rows ``b`` and points ``t ~ U(0, 1)`` and
+        averages ``grad f(b + t (x - b)) * (x - b)``. Unlike ``shap.GradientExplainer`` it
+
+        - runs one forward pass per batch for **all** explained outputs, and gets all their gradients from one
+          batched backward pass (``is_grads_batched``), instead of a forward and backward per output;
+        - batches the interpolation points of **all** samples together in large chunks, instead of one sample at a
+          time in batches of 50.
+
+        :param model: Module mapping ``(B, n_features)`` to ``(B, n_outputs)``.
+        :param background: ``(n_bg, n_features)`` baseline rows.
+        :param X: ``(n, n_features)`` samples to explain.
+        :param cols: ``(n, k)`` output column explained per sample and slot; fixed per sample, so every interpolation
+            point of a sample explains the same outputs.
+        :param fam_matrix: Optional ``(k, n_out)`` 0/1 matrix summing the k slots into ``n_out`` outputs.
+        :return: ``(n, n_features, n_out)`` SHAP values (``n_out = k`` without ``fam_matrix``).
+        """
+        import torch
+
+        nsamples = int(self.config.get("gradient_nsamples", 200))
+        rng = np.random.default_rng(int(self.config.get("seed", 0)))
+        bg = torch.as_tensor(np.asarray(background, dtype="float32"))
+        X_t = torch.as_tensor(np.asarray(X, dtype="float32"))
+        cols_t = torch.as_tensor(np.ascontiguousarray(cols), dtype=torch.long)
+        fam = None if fam_matrix is None else torch.as_tensor(fam_matrix, dtype=torch.float32)
+        n, n_feat = X_t.shape
+        n_out = cols_t.shape[1] if fam is None else fam.shape[1]
+
+        # Rows per chunk: keep the (n_out, rows, n_features) gradient tensor around 64M floats
+        default_rows = max(nsamples, int(64e6 // max(n_out * n_feat, 1)) // nsamples * nsamples)
+        rows_per_chunk = int(self.config.get("gradient_batch_size", default_rows))
+        per_chunk = max(1, rows_per_chunk // nsamples)  # whole samples per chunk
+
+        phi = np.zeros((n, n_feat, n_out), dtype="float32")
+        batched = True
+        model.eval()
+        for start in range(0, n, per_chunk):
+            idx = np.arange(start, min(start + per_chunk, n))
+            m = len(idx)
+            b = bg[rng.integers(0, len(bg), size=m * nsamples)]
+            t = torch.as_tensor(rng.random(m * nsamples, dtype="float32")).unsqueeze(1)
+            x = X_t[idx].repeat_interleave(nsamples, dim=0)
+            z = (b + t * (x - b)).requires_grad_(True)
+            out = model(z).gather(1, cols_t[idx].repeat_interleave(nsamples, dim=0))
+            if fam is not None:
+                out = out @ fam
+            grads = None
+            if batched:
+                try:
+                    eye = torch.eye(n_out).unsqueeze(1).expand(n_out, len(z), n_out)
+                    (grads,) = torch.autograd.grad(out, z, grad_outputs=eye, is_grads_batched=True)
+                except (RuntimeError, NotImplementedError):
+                    batched = False  # model not vmap-compatible: one backward per output, still one forward
+            if grads is None:
+                grads = torch.stack([
+                    torch.autograd.grad(out[:, j].sum(), z, retain_graph=j + 1 < n_out)[0] for j in range(n_out)
+                ])
+            contrib = grads * (x - b).unsqueeze(0)  # (n_out, m * nsamples, n_features)
+            phi[idx] = contrib.reshape(n_out, m, nsamples, n_feat).mean(dim=2).permute(1, 2, 0).detach().numpy()
+        return phi
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -294,6 +549,9 @@ class FeedForwardExplainer(ExplainerBase):
             analysis="tabular",
             model_type=self.config.get("model_type", "feedforward"),
             extras={"framework": self.framework},
+            chosen_index=getattr(self, "chosen_index", None),
+            target_heads=getattr(self, "target_heads", None),
+            target_families=getattr(self, "target_families", None),
         )
 
     # ------------------------------------------------------------------ #
@@ -322,7 +580,7 @@ class FeedForwardExplainer(ExplainerBase):
                 label = None
                 if isinstance(output_labels, dict):
                     label = output_labels.get(str(idx)) or output_labels.get(idx)
-                elif isinstance(output_labels, (list, tuple)) and idx < len(output_labels):
+                elif isinstance(output_labels, (list, tuple)) and isinstance(idx, (int, np.integer)) and idx < len(output_labels):
                     label = output_labels[idx]
                 sheet_name = str(label) if label else f"output_{idx}"
 

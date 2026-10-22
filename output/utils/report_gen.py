@@ -194,8 +194,9 @@ from output.utils.report_content import select_feature_indices
 # Load data from companion .npz file — avoids MemoryError for large datasets
 _data = np.load(r"{data_file}", allow_pickle=True)
 data_raw = _data["raw_data"]
+# Keys are output indices, or head/family names for targets= runs.
 all_shap_dict = {{
-    int(k.replace("shap_", "")): _data[k]
+    (int(k[5:]) if k[5:].lstrip("-").isdigit() else k[5:]): _data[k]
     for k in _data.files
     if k.startswith("shap_")
 }}
@@ -233,7 +234,8 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
         # Resolve correct label for each target — handles all 3 shapes
         if isinstance(output_labels, list):
             # Shape C — LSTM: ["PV"]
-            label = output_labels[target_idx] if target_idx < len(output_labels) else f"Target {target_idx}"
+            is_pos = isinstance(target_idx, (int, np.integer)) and target_idx < len(output_labels)
+            label = output_labels[target_idx] if is_pos else f"Target {target_idx}"
         elif isinstance(output_labels, dict):
             # Shape B — multioutput classification: use _name key if available
             name_key = f"{target_idx}_name"

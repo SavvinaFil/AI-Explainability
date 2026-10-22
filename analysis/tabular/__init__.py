@@ -66,6 +66,10 @@ def run_tabular_analysis(config, *, model=None, data=None, background_data=None)
     # Only the neural explainer accepts a background_data kwarg. Build the
     # init kwargs dynamically so tree-based classes keep their simple signature.
     _neural_types = {"feedforward", "mlp", "neural_net", "rl_policy", "policy", "rl_agent"}
+    if config.get("targets") is not None and model_type not in _neural_types:
+        raise ValueError(
+            f"targets= is only supported for feedforward/policy models; got model_type={model_type!r}."
+        )
     init_kwargs = {"model": model, "data": data}
     if background_data is not None and model_type in _neural_types:
         init_kwargs["background_data"] = background_data

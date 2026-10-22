@@ -133,6 +133,43 @@ chosen["tap"]  # same for tap
 number of heads and any head sizes. A continuous head is simply a head with one
 index (no argmax needed — the output is the action).
 
+### Faster: explain only the action taken (`targets=`)
+
+The run above attributes **every** output column and throws most of that work
+away when you only care about the chosen logit per head. Pass the heads to
+`explain()` instead, and only the selected output of each head is explained:
+
+```python
+heads = {"P": [0, 1, 2], "Q": [3, 4, 5], "tap": [6, 7, 8, 9]}
+
+result = aie.explain(
+    model=policy_predict, data=states, analysis="tabular",
+    model_type="rl_policy", package="callable", explainer_type="kernel",
+    feature_names=OBS, background_size=100,
+    targets=heads,              # or targets="argmax" for a single head
+)
+
+result.shap_values["P"]           # (n_states, n_features) — SHAP of the chosen P
+result.chosen_index["P"]          # which P output was chosen, per state
+chosen = result.chosen_actions(heads)   # same call as before, no recomputation
+```
+
+The argmax of each head is computed once on your states, and SHAP then runs on
+a wrapped model that returns only the chosen logits — 3 outputs instead of 10
+here (490 → 35 for a 35-head policy). The choice is fixed per state, so the
+SHAP values are identical to the full run followed by `chosen_actions`.
+
+For a cheaper overview, sum heads into families:
+
+```python
+result = aie.explain(..., targets=heads,
+                     targets_reduce="sum", target_families={"PQ": ["P", "Q"]})
+sorted(result.shap_values)   # ['PQ', 'tap'] — heads not in a family stay separate
+```
+
+`targets=` works with the `kernel`, `gradient` and `deep` backends for
+feedforward / policy models, and cannot be combined with `target_index`.
+
 ---
 
 ## 4. If your policy isn't a plain `nn.Module`

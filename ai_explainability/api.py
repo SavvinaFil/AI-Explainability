@@ -78,6 +78,9 @@ def _build_config(
     extras: Mapping[str, Any],
     top_features: int | None = None,
     select_features: Sequence[str] | None = None,
+    targets: str | Mapping[str, Sequence[int]] | None = None,
+    targets_reduce: str | None = None,
+    target_families: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the legacy-style config dict the explainers still consume."""
     cfg: dict[str, Any] = {
@@ -88,6 +91,16 @@ def _build_config(
         cfg["top_features"] = int(top_features)
     if select_features is not None:
         cfg["select_features"] = list(select_features)
+    if targets is not None:
+        # A scalar column (e.g. a continuous action) is a one-index head.
+        cfg["targets"] = targets if isinstance(targets, str) else {
+            str(k): [int(c) for c in (v if hasattr(v, "__iter__") else [v])]
+            for k, v in targets.items()
+        }
+    if targets_reduce is not None:
+        cfg["targets_reduce"] = targets_reduce
+    if target_families is not None:
+        cfg["target_families"] = {str(k): list(v) for k, v in target_families.items()}
     if package is not None:
         # Framework selector for neural explainers ("pytorch" / "tensorflow").
         cfg["package"] = package
@@ -152,6 +165,10 @@ def explain(
     # Output trimming (great for models with many features) --------------- #
     top_features: int | None = None,
     select_features: Sequence[str] | None = None,
+    # Per-sample targets: explain only the action taken (RL policies) ---- #
+    targets: str | Mapping[str, Sequence[int]] | None = None,
+    targets_reduce: str | None = None,
+    target_families: Mapping[str, Sequence[str]] | None = None,
     **extras: Any,
 ):
     """Run an explainability analysis on an in-memory model and dataset.
@@ -176,6 +193,17 @@ def explain(
         LSTM-only in-memory tensors.
     explainer_type, input_dim, hidden_size, look_back, look_ahead:
         LSTM-only hyper-parameters.
+    targets:
+        Feedforward models only. Explain, per sample, only the selected
+        output instead of every output column. ``'argmax'`` picks the highest
+        output; ``{'P': [0, 1, 2], 'tap': [6, 7, 8, 9]}`` picks the argmax
+        within each head (same mapping as ``result.chosen_actions``). The
+        result is keyed by head name and stores the chosen indices in
+        ``result.chosen_index``. Mutually exclusive with ``target_index``.
+    targets_reduce, target_families:
+        ``targets_reduce='sum'`` with ``target_families={'P': ['P0', 'P1']}``
+        sums the chosen logits of each family's heads into one output for a
+        cheaper overview run. Heads not in any family stay separate.
     **extras:
         Additional config keys (e.g. ``model_path``, ``dataset_path``,
         ``background_data_path``) passed straight through to the explainer.
@@ -191,6 +219,21 @@ def explain(
         raise ValueError(
             f"analysis must be 'tabular' or 'timeseries'; got {analysis!r}"
         )
+
+    if targets is not None:
+        if analysis != "tabular":
+            raise ValueError("targets= is only supported for analysis='tabular'.")
+        if target_index is not None:
+            raise ValueError("Pass either targets= or target_index=, not both.")
+        if not isinstance(targets, (str, Mapping)):
+            raise ValueError(
+                "targets must be 'argmax' or a {head: [output indices]} mapping; "
+                f"got {type(targets).__name__}."
+            )
+        if target_families is not None and targets_reduce is None:
+            raise ValueError("target_families= only takes effect with targets_reduce='sum'.")
+    elif targets_reduce is not None or target_families is not None:
+        raise ValueError("targets_reduce / target_families require targets=.")
 
     # Filter extras down to things the config actually accepts (still accept
     # unknown keys — they may be new knobs we haven't catalogued).
@@ -215,6 +258,9 @@ def explain(
         look_ahead=look_ahead,
         top_features=top_features,
         select_features=select_features,
+        targets=targets,
+        targets_reduce=targets_reduce,
+        target_families=target_families,
         extras=filtered_extras,
     )
 
