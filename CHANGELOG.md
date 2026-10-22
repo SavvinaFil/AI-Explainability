@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Per-sample targets** — explain only the action taken. `aie.explain(...,
+  targets='argmax')` explains, per sample, the highest output;
+  `targets={'P': [0, 1, 2], 'tap': [6, 7, 8, 9]}` does the same per head.
+  SHAP runs on a wrapped model that returns only the chosen logits, so the
+  number of explained outputs drops from the logit count to the head count.
+  Samples are grouped by chosen action, so the selection is fixed per sample
+  and results equal the full run + `chosen_actions`. Feedforward / policy
+  models only (`kernel`, `gradient`, `deep`).
+- `targets_reduce='sum'` + `target_families={family: [heads]}` collapses heads
+  into families for a cheaper overview run.
+- `ExplanationResult.chosen_index`, `target_heads`, `target_families`.
+  `chosen_output` / `chosen_actions` return the stored choice on such results.
+
 ## [0.8.0] - 2026-10-20
 
 ### Added
