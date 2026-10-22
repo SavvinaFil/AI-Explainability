@@ -364,9 +364,33 @@ class FeedForwardExplainer(ExplainerBase):
         shap_out = {k: np.zeros((n, n_feat), dtype=float) for k in out_keys}
         pred_out = {k: np.zeros(n, dtype=float) for k in out_keys}
         ev_out = {k: np.zeros(n, dtype=float) for k in out_keys}
-        # One SHAP run per group; with many heads nearly every sample is its own group, so show progress
+
+        batched = explainer_type == "gradient" and self.framework == "pytorch"
+        if batched:
+            # The chosen outputs and frozen values travel with each sample, so every sample is explained in one
+            # batched run instead of one SHAP run per group.
+            if heads is not None:
+                cols = chosen
+                fam_matrix = np.zeros((len(head_names), len(out_keys)), dtype="float32")
+                for j, fam in enumerate(out_keys):
+                    for h in families[fam]:
+                        fam_matrix[head_pos[h], j] = 1.0
+            else:
+                cols = np.broadcast_to(np.asarray(out_keys, dtype=int), (n, len(out_keys)))
+                fam_matrix = None
+            phi, expected = self._expected_gradients_torch(self.model, bg_rows, X, cols, fam_matrix, frozen_idx)
+            sel_preds = np.take_along_axis(preds_all, np.asarray(cols), axis=1)
+            if fam_matrix is not None:
+                sel_preds = sel_preds @ fam_matrix
+            for j, k in enumerate(out_keys):
+                shap_out[k] = phi[:, :, j].astype(float)
+                pred_out[k] = sel_preds[:, j]
+                ev_out[k] = expected[:, j]
+            groups = np.zeros((1, 0))
+
+        # Otherwise one SHAP run per group; with many heads nearly every sample is its own group, so show progress
         progress = tqdm(
-            range(len(groups)), desc="SHAP", unit="group",
+            range(0 if batched else len(groups)), desc="SHAP", unit="group",
             disable=not self.config.get("verbose", True) or len(groups) == 1,
         )
         for g in progress:
@@ -417,10 +441,95 @@ class FeedForwardExplainer(ExplainerBase):
             self.target_families = families
             print(
                 f"Explained {len(out_keys)} selected output(s) instead of {n_outputs} "
-                f"({len(groups)} group(s) of samples)."
+                + (f"(one batched expected-gradients run over {n} sample(s))." if batched
+                   else f"({len(groups)} group(s) of samples).")
             )
         # Compatibility for the notebook generator.
         self.shap_values = self.all_shap_values[out_keys[0]]
+
+    def _expected_gradients_torch(self, model, background, X, cols, fam_matrix=None, frozen_idx=()):
+        """Batched expected gradients (the estimator behind ``shap.GradientExplainer``) for PyTorch.
+
+        For every sample ``x`` it draws ``gradient_nsamples`` background rows ``b`` and points ``t ~ U(0, 1)`` and
+        averages ``grad f(b + t (x - b)) * (x - b)``. Unlike ``shap.GradientExplainer`` it
+
+        - runs one forward pass per batch for **all** explained outputs, and gets all their gradients from one
+          batched backward pass (``is_grads_batched``), instead of a forward and backward per output;
+        - batches the interpolation points of **all** samples together in large chunks, instead of one sample at a
+          time in batches of 50.
+
+        :param model: Module mapping ``(B, n_features)`` to ``(B, n_outputs)``.
+        :param background: ``(n_bg, n_features)`` baseline rows.
+        :param X: ``(n, n_features)`` samples to explain.
+        :param cols: ``(n, k)`` output column explained per sample and slot; fixed per sample, so every interpolation
+            point of a sample explains the same outputs.
+        :param fam_matrix: Optional ``(k, n_out)`` 0/1 matrix summing the k slots into ``n_out`` outputs.
+        :param frozen_idx: Feature columns set to the sample's own value in every background row, so they are held
+            fixed (``x - b`` is 0 there, hence their SHAP is exactly 0).
+        :return: ``(n, n_features, n_out)`` SHAP values (``n_out = k`` without ``fam_matrix``) and the ``(n, n_out)``
+            per-sample baseline ``E_b[f(b)]`` (per sample because of the frozen columns).
+        """
+        import torch
+
+        nsamples = int(self.config.get("gradient_nsamples", 200))
+        rng = np.random.default_rng(int(self.config.get("seed", 0)))
+        bg = torch.as_tensor(np.asarray(background, dtype="float32"))
+        X_t = torch.as_tensor(np.asarray(X, dtype="float32"))
+        cols_t = torch.as_tensor(np.ascontiguousarray(cols), dtype=torch.long)
+        fam = None if fam_matrix is None else torch.as_tensor(fam_matrix, dtype=torch.float32)
+        frozen = torch.as_tensor(list(frozen_idx), dtype=torch.long)
+        n, n_feat = X_t.shape
+        n_out = cols_t.shape[1] if fam is None else fam.shape[1]
+
+        def select(out, rows_cols):
+            out = out.gather(1, rows_cols)
+            return out if fam is None else out @ fam
+
+        # Rows per chunk: keep the (n_out, rows, n_features) gradient tensor around 64M floats
+        default_rows = max(nsamples, int(64e6 // max(n_out * n_feat, 1)) // nsamples * nsamples)
+        rows_per_chunk = int(self.config.get("gradient_batch_size", default_rows))
+        per_chunk = max(1, rows_per_chunk // nsamples)  # whole samples per chunk
+
+        phi = np.zeros((n, n_feat, n_out), dtype="float32")
+        expected = np.zeros((n, n_out), dtype="float32")
+        batched = True
+        model.eval()
+        chunks = range(0, n, per_chunk)
+        progress = tqdm(chunks, desc="SHAP", unit="chunk", disable=not self.config.get("verbose", True) or len(chunks) == 1)
+        for start in progress:
+            idx = np.arange(start, min(start + per_chunk, n))
+            m = len(idx)
+            x_rows = X_t[idx]
+
+            # Baseline E_b[f(b)] per sample, with the frozen columns of b set to the sample's values
+            with torch.no_grad():
+                b_all = bg.unsqueeze(0).repeat(m, 1, 1)
+                if len(frozen):
+                    b_all[:, :, frozen] = x_rows[:, frozen].unsqueeze(1)
+                f_b = select(model(b_all.reshape(-1, n_feat)), cols_t[idx].repeat_interleave(len(bg), dim=0))
+                expected[idx] = f_b.reshape(m, len(bg), n_out).mean(dim=1).numpy()
+
+            b = bg[rng.integers(0, len(bg), size=m * nsamples)]
+            x = x_rows.repeat_interleave(nsamples, dim=0)
+            if len(frozen):
+                b[:, frozen] = x[:, frozen]
+            t = torch.as_tensor(rng.random(m * nsamples, dtype="float32")).unsqueeze(1)
+            z = (b + t * (x - b)).requires_grad_(True)
+            out = select(model(z), cols_t[idx].repeat_interleave(nsamples, dim=0))
+            grads = None
+            if batched:
+                try:
+                    eye = torch.eye(n_out).unsqueeze(1).expand(n_out, len(z), n_out)
+                    (grads,) = torch.autograd.grad(out, z, grad_outputs=eye, is_grads_batched=True)
+                except (RuntimeError, NotImplementedError):
+                    batched = False  # model not vmap-compatible: one backward per output, still one forward
+            if grads is None:
+                grads = torch.stack([
+                    torch.autograd.grad(out[:, j].sum(), z, retain_graph=j + 1 < n_out)[0] for j in range(n_out)
+                ])
+            contrib = grads * (x - b).unsqueeze(0)  # (n_out, m * nsamples, n_features)
+            phi[idx] = contrib.reshape(n_out, m, nsamples, n_feat).mean(dim=2).permute(1, 2, 0).detach().numpy()
+        return phi, expected
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #

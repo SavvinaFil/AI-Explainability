@@ -19,6 +19,21 @@ All notable changes to this project are documented here. The format is based on
   into families for a cheaper overview run.
 - `ExplanationResult.chosen_index`, `target_heads`, `target_families`.
   `chosen_output` / `chosen_actions` return the stored choice on such results.
+- **Batched expected gradients for PyTorch** (`explainer_type='gradient'`).
+  It replaces `shap.GradientExplainer` with the same estimator, run as:
+  - one forward pass per chunk for all explained outputs;
+  - all their gradients from one batched backward pass (`is_grads_batched`),
+    falling back to one backward per output if the model can't be vmapped;
+  - the interpolation points of all samples batched together.
+  The chosen outputs (`targets=`) and frozen feature values travel with each
+  sample's rows, so all samples run in one batched pass instead of one SHAP
+  run per group. The baseline `E[f]` is computed per sample, with the frozen
+  columns of the background set to that sample's values. A progress bar runs
+  over the chunks.
+  New config: `gradient_nsamples` (default 200, as before), `gradient_batch_size`
+  (rows per chunk, default sized to ~64M gradient floats) and `seed`.
+  Measured on a 45-head entity policy (887 features): 6 → 1.45 s per state on
+  one CPU thread.
 - **Feature groups**: `explain(..., feature_groups={group: [features]})` or a
   callable `feature -> group`. `result.group_shap_values` (per-sample sum of
   member SHAP) and `result.group_importance(normalize='share')`. Ungrouped
@@ -59,9 +74,15 @@ All notable changes to this project are documented here. The format is based on
   "cohort_heatmap")`.
 
 ### Changed
-- The feedforward explainer runs SHAP once per group of samples that share
+- The `kernel` and `deep` backends of the feedforward explainer (and
+  `gradient` with TensorFlow) run SHAP once per group of samples that share
   their chosen actions (`targets=`) and frozen feature values; with neither,
-  that is a single run as before.
+  that is a single run as before. PyTorch `gradient` runs batched, see above.
+
+### Fixed
+- A plain-array `background_data` (or `data`) without `feature_names` no longer
+  fails with "Shape of passed values is (n, d), indices imply (n, 0)". An empty
+  `feature_names` list now means "no names", like `None`.
 
 ## [0.8.0] - 2026-10-20
 
