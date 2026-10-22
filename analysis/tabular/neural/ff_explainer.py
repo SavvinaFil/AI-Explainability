@@ -22,6 +22,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 import shap
+from tqdm.auto import tqdm
 
 from ..tree_based.base import ExplainerBase
 
@@ -363,7 +364,12 @@ class FeedForwardExplainer(ExplainerBase):
         shap_out = {k: np.zeros((n, n_feat), dtype=float) for k in out_keys}
         pred_out = {k: np.zeros(n, dtype=float) for k in out_keys}
         ev_out = {k: np.zeros(n, dtype=float) for k in out_keys}
-        for g in range(len(groups)):
+        # One SHAP run per group; with many heads nearly every sample is its own group, so show progress
+        progress = tqdm(
+            range(len(groups)), desc="SHAP", unit="group",
+            disable=not self.config.get("verbose", True) or len(groups) == 1,
+        )
+        for g in progress:
             rows = np.flatnonzero(inverse == g)
             bg = background
             if frozen_idx:
