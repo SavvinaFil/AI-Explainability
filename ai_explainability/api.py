@@ -27,7 +27,7 @@ Example (Databricks notebook style)::
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 # Keys that are passed through to the legacy ``config`` dict when present as
@@ -78,6 +78,9 @@ def _build_config(
     extras: Mapping[str, Any],
     top_features: int | None = None,
     select_features: Sequence[str] | None = None,
+    targets: str | Mapping[str, Sequence[int]] | None = None,
+    targets_reduce: str | None = None,
+    target_families: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the legacy-style config dict the explainers still consume."""
     cfg: dict[str, Any] = {
@@ -88,6 +91,16 @@ def _build_config(
         cfg["top_features"] = int(top_features)
     if select_features is not None:
         cfg["select_features"] = list(select_features)
+    if targets is not None:
+        # A scalar column (e.g. a continuous action) is a one-index head.
+        cfg["targets"] = targets if isinstance(targets, str) else {
+            str(k): [int(c) for c in (v if hasattr(v, "__iter__") else [v])]
+            for k, v in targets.items()
+        }
+    if targets_reduce is not None:
+        cfg["targets_reduce"] = targets_reduce
+    if target_families is not None:
+        cfg["target_families"] = {str(k): list(v) for k, v in target_families.items()}
     if package is not None:
         # Framework selector for neural explainers ("pytorch" / "tensorflow").
         cfg["package"] = package
@@ -152,6 +165,16 @@ def explain(
     # Output trimming (great for models with many features) --------------- #
     top_features: int | None = None,
     select_features: Sequence[str] | None = None,
+    # Per-sample targets: explain only the action taken (RL policies) ---- #
+    targets: str | Mapping[str, Sequence[int]] | None = None,
+    targets_reduce: str | None = None,
+    target_families: Mapping[str, Sequence[str]] | None = None,
+    # Structured inputs, groups and cohorts --------------------------------- #
+    feature_groups: Mapping[str, Sequence[str]] | Callable[[str], str] | None = None,
+    frozen_features: Sequence[str] | None = None,
+    field_names: Mapping[str, Sequence[str]] | None = None,
+    row_labels: Callable[[int, str], str | None] | None = None,
+    cohorts: Mapping[str, Any] | Sequence[Any] | None = None,
     **extras: Any,
 ):
     """Run an explainability analysis on an in-memory model and dataset.
@@ -172,10 +195,50 @@ def explain(
     output_dir, save_excel, generate_notebook:
         Disk I/O controls. Default to ``None`` / ``False`` / ``False`` so a
         pure in-memory run never writes to the filesystem.
-    background_data, test_data:
-        LSTM-only in-memory tensors.
+    background_data:
+        SHAP baseline (reference) samples, for every explainer: feedforward
+        backends, tree models (switches TreeSHAP to
+        ``feature_perturbation="interventional"``) and LSTMs. When omitted,
+        feedforward models draw ``background_size`` rows from ``data`` (k-means
+        summary for ``kernel``, a random sample seeded by ``seed`` for
+        ``gradient`` / ``deep``) and tree models use the path-dependent tree
+        statistics.
+    test_data:
+        LSTM-only in-memory tensor of samples to explain.
     explainer_type, input_dim, hidden_size, look_back, look_ahead:
         LSTM-only hyper-parameters.
+    targets:
+        Feedforward models only. Explain, per sample, only the selected
+        output instead of every output column. ``'argmax'`` picks the highest
+        output; ``{'P': [0, 1, 2], 'tap': [6, 7, 8, 9]}`` picks the argmax
+        within each head (same mapping as ``result.chosen_actions``). The
+        result is keyed by head name and stores the chosen indices in
+        ``result.chosen_index``. Mutually exclusive with ``target_index``.
+    targets_reduce, target_families:
+        ``targets_reduce='sum'`` with ``target_families={'P': ['P0', 'P1']}``
+        sums the chosen logits of each family's heads into one output for a
+        cheaper overview run. Heads not in any family stay separate.
+    feature_groups:
+        ``{group: [feature names]}`` or a callable ``feature -> group``. Group
+        SHAP is the per-sample sum of member SHAP (SHAP is additive); see
+        ``result.group_shap_values`` / ``result.group_importance()``. With dict
+        ``data`` each top-level key is a default group.
+    frozen_features:
+        Feedforward only. Features (or dict-input keys) held at each explained
+        sample's own value instead of being attributed, e.g. masks and validity
+        flags. Their SHAP is exactly zero.
+    field_names:
+        For dict ``data``: names of the last axis per key, e.g.
+        ``{'bus': ['vm', 'va']}`` gives features ``bus[3].vm``.
+    row_labels:
+        Callable ``(sample_idx, feature) -> label | None`` naming the real
+        element a feature describes in that sample (e.g. the bus behind table
+        row 3 at this step). Enables ``result.label_importance(output)``.
+        ``sample_idx`` counts the explained samples from 0.
+    cohorts:
+        ``{cohort: boolean mask}`` or one label per sample. Enables
+        ``result.cohort_importance()``; see also ``result.by_cohort()`` and
+        ``ai_explainability.compare()``.
     **extras:
         Additional config keys (e.g. ``model_path``, ``dataset_path``,
         ``background_data_path``) passed straight through to the explainer.
@@ -191,6 +254,29 @@ def explain(
         raise ValueError(
             f"analysis must be 'tabular' or 'timeseries'; got {analysis!r}"
         )
+
+    if targets is not None:
+        if analysis != "tabular":
+            raise ValueError("targets= is only supported for analysis='tabular'.")
+        if target_index is not None:
+            raise ValueError("Pass either targets= or target_index=, not both.")
+        if not isinstance(targets, (str, Mapping)):
+            raise ValueError(
+                "targets must be 'argmax' or a {head: [output indices]} mapping; "
+                f"got {type(targets).__name__}."
+            )
+        if target_families is not None and targets_reduce is None:
+            raise ValueError("target_families= only takes effect with targets_reduce='sum'.")
+    elif targets_reduce is not None or target_families is not None:
+        raise ValueError("targets_reduce / target_families require targets=.")
+    if analysis != "tabular" and (frozen_features is not None or field_names is not None):
+        raise ValueError(
+            "frozen_features= / field_names= are only supported for analysis='tabular'."
+        )
+    if frozen_features is not None:
+        extras["frozen_features"] = [str(f) for f in frozen_features]
+    if field_names is not None:
+        extras["field_names"] = {str(k): list(v) for k, v in field_names.items()}
 
     # Filter extras down to things the config actually accepts (still accept
     # unknown keys — they may be new knobs we haven't catalogued).
@@ -215,6 +301,9 @@ def explain(
         look_ahead=look_ahead,
         top_features=top_features,
         select_features=select_features,
+        targets=targets,
+        targets_reduce=targets_reduce,
+        target_families=target_families,
         extras=filtered_extras,
     )
 
@@ -243,6 +332,18 @@ def explain(
             result.top_features = int(top_features)
         if select_features is not None:
             result.select_features = list(select_features)
+        if feature_groups is not None:
+            result.feature_groups = (
+                feature_groups if callable(feature_groups)
+                else {str(g): list(m) for g, m in feature_groups.items()}
+            )
+            result._group_columns()  # validate now, not at first use
+        if row_labels is not None:
+            result.row_labels = row_labels
+        if cohorts is not None:
+            from .result import _resolve_cohorts
+
+            result.cohorts = _resolve_cohorts(cohorts, result._n_samples())
 
     # Gentle reminder: a pure in-memory run writes nothing. Many users expect a
     # report/audit file and are surprised when none appears (there's no error,

@@ -137,7 +137,8 @@ def to_pandas(
             raise TypeError(
                 f"ndarray data must be 1D or 2D for tabular analysis; got {data.ndim}D"
             )
-        cols = list(feature_names) if feature_names is not None else [
+        # An empty list (the explainer default when no names are given) means "no names", like None
+        cols = list(feature_names) if feature_names else [
             f"f{i}" for i in range(data.shape[1])
         ]
         return pd.DataFrame(data, columns=cols)

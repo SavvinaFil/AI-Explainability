@@ -47,8 +47,8 @@ def run_tabular_analysis(config, *, model=None, data=None, background_data=None)
         In-memory dataset (``pd.DataFrame`` / ``pyspark.sql.DataFrame`` /
         ``np.ndarray``). Takes precedence over ``config["dataset_path"]``.
     background_data:
-        Optional SHAP baseline (used by the feedforward explainer's kernel /
-        deep / gradient backends). Ignored by tree-based explainers.
+        Optional SHAP baseline. Used by the feedforward backends and by tree
+        models (interventional TreeSHAP); see ``explain(background_data=...)``.
 
     Returns
     -------
@@ -63,12 +63,19 @@ def run_tabular_analysis(config, *, model=None, data=None, background_data=None)
             f"Known types: {sorted(_MODEL_ROUTES)}."
         )
 
-    # Only the neural explainer accepts a background_data kwarg. Build the
-    # init kwargs dynamically so tree-based classes keep their simple signature.
     _neural_types = {"feedforward", "mlp", "neural_net", "rl_policy", "policy", "rl_agent"}
-    init_kwargs = {"model": model, "data": data}
-    if background_data is not None and model_type in _neural_types:
-        init_kwargs["background_data"] = background_data
+    if model_type not in _neural_types:
+        from collections.abc import Mapping
+
+        neural_only = [k for k in ("targets", "frozen_features") if config.get(k)]
+        if isinstance(data, Mapping):
+            neural_only.append("dict data")
+        if neural_only:
+            raise ValueError(
+                f"{', '.join(neural_only)} is only supported for feedforward/policy "
+                f"models; got model_type={model_type!r}."
+            )
+    init_kwargs = {"model": model, "data": data, "background_data": background_data}
 
     explainer = explainer_class(config, **init_kwargs)
 
