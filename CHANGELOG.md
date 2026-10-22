@@ -19,6 +19,49 @@ All notable changes to this project are documented here. The format is based on
   into families for a cheaper overview run.
 - `ExplanationResult.chosen_index`, `target_heads`, `target_families`.
   `chosen_output` / `chosen_actions` return the stored choice on such results.
+- **Feature groups**: `explain(..., feature_groups={group: [features]})` or a
+  callable `feature -> group`. `result.group_shap_values` (per-sample sum of
+  member SHAP) and `result.group_importance(normalize='share')`. Ungrouped
+  features are their own group. The Excel export gains a `group_importance`
+  sheet and the HTML report a group table.
+- **Dict observations**: `data` may be a mapping of `(n, *shape)` arrays. It is
+  flattened in key order (C order within each array), the model receives the
+  rebuilt dict, feature names follow the shape (`bus[3][1]`, or `bus[3].va`
+  with `field_names={'bus': ['vm', 'va']}`), and each key is a default group.
+  PyTorch modules and callables.
+- **Frozen features**: `frozen_features=[...]` (names or dict keys) holds masks
+  and validity flags at each sample's own value; their SHAP is exactly zero.
+- **Per-sample row labels**: `row_labels=fn(sample_idx, feature) -> label` with
+  `result.label_shap_values(output)` / `result.label_importance(output)` for
+  tables whose rows mean different elements in different samples.
+- **Cohorts**: `explain(..., cohorts={'day': mask, ...})` or
+  `result.by_cohort(labels)`, `result.cohort_importance()`,
+  `result.plot_cohort_heatmap()`; `cohort_importance` sheet in the Excel export.
+- **Comparing agents**: `aie.compare({'A': res_a, 'B': res_b}, groups=...)`
+  returns a group × (agent, cohort) table, normalised to shares by default
+  because logit scales differ between networks; `aie.plot_heatmap(table)`.
+- **Correctness checks on every result** (`ai_explainability.diagnostics`):
+  `result.unmeasurable_features` with a warning for features constant over
+  background ∪ data; `result.additivity_error` (per output mean / max / relative
+  max of `|Σ SHAP + E[f] − f(x)|`) with a warning above `additivity_tolerance`
+  (default 5%, 50% for `gradient`); `result.expected_value`; `result.settings`
+  (explainer, background source and size, seed, `nsamples`, frozen features,
+  versions). Tree classifiers skip the additivity check (SHAP checks it).
+- **Explicit baseline for tree models**: `background_data` now also applies to
+  tree explainers (interventional TreeSHAP); `seed=` controls the random
+  background sample of feedforward models. The `explain()` docstring documents
+  how the default background is chosen.
+- **Report that scales to many outputs** (`save_report_html`): a summary page
+  (warnings, group / feature importance overall and per cohort, run settings),
+  one section per action head with the chosen-category distribution and a
+  collapsible top-feature table per category, `heads=` to get head sections
+  from a full (all-logit) result, and optional `figures=("group_heatmap",
+  "cohort_heatmap")`.
+
+### Changed
+- The feedforward explainer runs SHAP once per group of samples that share
+  their chosen actions (`targets=`) and frozen feature values; with neither,
+  that is a single run as before.
 
 ## [0.8.0] - 2026-10-20
 

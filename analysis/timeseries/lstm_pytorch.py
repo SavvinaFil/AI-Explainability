@@ -161,9 +161,21 @@ class LSTMExplainer(TimeseriesExplainerBase):
                 shap_raw = explainer.shap_values(test_subset)
             else:  # "deep"
                 explainer = shap.DeepExplainer(self.model, background)
+                # Additivity is reported by ai_explainability.diagnostics instead.
                 shap_raw = explainer.shap_values(test_subset, check_additivity=False)
         finally:
             torch.set_grad_enabled(prev_grad)
+
+        # Baseline E[f]: DeepExplainer computes it; for expected gradients use
+        # the mean model output over the background.
+        if explainer_type == "deep":
+            ev = explainer.expected_value
+            ev = ev.detach().cpu().numpy() if hasattr(ev, "detach") else ev
+            self.expected_values = {0: float(np.ravel(ev)[0])}
+        else:
+            with torch.no_grad():
+                self.expected_values = {0: float(self.model(background).mean())}
+        self.background_values = background.detach().cpu().numpy()
 
         self.shap_values = shap_raw
 
@@ -204,9 +216,10 @@ class LSTMExplainer(TimeseriesExplainerBase):
     # In-memory result view                                              #
     # ------------------------------------------------------------------ #
     def to_result(self):
+        from ai_explainability.diagnostics import annotate
         from ai_explainability.result import ExplanationResult
 
-        return ExplanationResult(
+        result = ExplanationResult(
             shap_values=dict(self.all_shap_values),
             predictions=dict(getattr(self, "all_predictions", {})),
             raw_data=None,  # 3D — not naturally a DataFrame
@@ -214,6 +227,19 @@ class LSTMExplainer(TimeseriesExplainerBase):
             feature_names=list(self.config.get("feature_names", [])),
             analysis="timeseries",
             model_type=self.config.get("model_type", "lstm"),
+        )
+        return annotate(
+            result,
+            background=getattr(self, "background_values", None),
+            expected_values=getattr(self, "expected_values", None),
+            settings={
+                "explainer_type": self.config.get("explainer_type", "gradient"),
+                "framework": "pytorch",
+                "background": "background_data",
+                "background_size": len(getattr(self, "background_values", [])),
+                "n_samples_explained": len(self.raw_data_values),
+            },
+            tolerance=self.config.get("additivity_tolerance"),
         )
 
     # ------------------------------------------------------------------ #
