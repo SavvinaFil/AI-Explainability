@@ -382,6 +382,8 @@ class FeedForwardExplainer(ExplainerBase):
             sel_preds = np.take_along_axis(preds_all, np.asarray(cols), axis=1)
             if fam_matrix is not None:
                 sel_preds = sel_preds @ fam_matrix
+            if self.split_half_shap is not None:
+                self.split_half_values = {k: self.split_half_shap[:, :, j] for j, k in enumerate(out_keys)}
             for j, k in enumerate(out_keys):
                 shap_out[k] = phi[:, :, j].astype(float)
                 pred_out[k] = sel_preds[:, j]
@@ -467,12 +469,20 @@ class FeedForwardExplainer(ExplainerBase):
         :param frozen_idx: Feature columns set to the sample's own value in every background row, so they are held
             fixed (``x - b`` is 0 there, hence their SHAP is exactly 0).
         :return: ``(n, n_features, n_out)`` SHAP values (``n_out = k`` without ``fam_matrix``) and the ``(n, n_out)``
-            per-sample baseline ``E_b[f(b)]`` (per sample because of the frozen columns).
+            per-sample baseline ``E_b[f(b)]`` over the drawn background rows (per sample because of the frozen
+            columns and reference pools).
+
+        Sampling is stratified: each sample cycles through its background pool (``config['reference_pools']``, one
+        index array into the background per sample; default all rows) without replacement, and its ``t`` values
+        are one per stratum of ``[0, 1]``. With ``config['split_half']`` the SHAP values of the even-numbered
+        draws are kept in ``self.split_half_shap`` (the odd half is ``2 * phi - half``) as a reliability check.
         """
         import torch
 
         nsamples = int(self.config.get("gradient_nsamples", 200))
         rng = np.random.default_rng(int(self.config.get("seed", 0)))
+        pools = self.config.get("reference_pools")
+        split_half = bool(self.config.get("split_half", False))
         bg = torch.as_tensor(np.asarray(background, dtype="float32"))
         X_t = torch.as_tensor(np.asarray(X, dtype="float32"))
         cols_t = torch.as_tensor(np.ascontiguousarray(cols), dtype=torch.long)
@@ -491,7 +501,9 @@ class FeedForwardExplainer(ExplainerBase):
         per_chunk = max(1, rows_per_chunk // nsamples)  # whole samples per chunk
 
         phi = np.zeros((n, n_feat, n_out), dtype="float32")
+        half = np.zeros((n, n_feat, n_out), dtype="float32") if split_half else None
         expected = np.zeros((n, n_out), dtype="float32")
+        all_rows = np.arange(len(bg))
         batched = True
         model.eval()
         chunks = range(0, n, per_chunk)
@@ -501,21 +513,24 @@ class FeedForwardExplainer(ExplainerBase):
             m = len(idx)
             x_rows = X_t[idx]
 
-            # Baseline E_b[f(b)] per sample, with the frozen columns of b set to the sample's values
-            with torch.no_grad():
-                b_all = bg.unsqueeze(0).repeat(m, 1, 1)
-                if len(frozen):
-                    b_all[:, :, frozen] = x_rows[:, frozen].unsqueeze(1)
-                f_b = select(model(b_all.reshape(-1, n_feat)), cols_t[idx].repeat_interleave(len(bg), dim=0))
-                expected[idx] = f_b.reshape(m, len(bg), n_out).mean(dim=1).numpy()
-
-            b = bg[rng.integers(0, len(bg), size=m * nsamples)]
+            # Background rows: each sample cycles through its (shuffled) pool; t: one point per stratum of [0, 1]
+            ref = np.concatenate([
+                np.resize(rng.permutation(all_rows if pools is None else np.asarray(pools[i])), nsamples) for i in idx
+            ])
+            t = (np.concatenate([rng.permutation(nsamples) for _ in idx]) + rng.random(m * nsamples)) / nsamples
+            b = bg[torch.as_tensor(ref)]
             x = x_rows.repeat_interleave(nsamples, dim=0)
             if len(frozen):
                 b[:, frozen] = x[:, frozen]
-            t = torch.as_tensor(rng.random(m * nsamples, dtype="float32")).unsqueeze(1)
+            rows_cols = cols_t[idx].repeat_interleave(nsamples, dim=0)
+
+            # Baseline E_b[f(b)] per sample over its drawn rows, with the frozen columns set to the sample's values
+            with torch.no_grad():
+                expected[idx] = select(model(b), rows_cols).reshape(m, nsamples, n_out).mean(dim=1).numpy()
+
+            t = torch.as_tensor(t, dtype=torch.float32).unsqueeze(1)
             z = (b + t * (x - b)).requires_grad_(True)
-            out = select(model(z), cols_t[idx].repeat_interleave(nsamples, dim=0))
+            out = select(model(z), rows_cols)
             grads = None
             if batched:
                 try:
@@ -527,8 +542,11 @@ class FeedForwardExplainer(ExplainerBase):
                 grads = torch.stack([
                     torch.autograd.grad(out[:, j].sum(), z, retain_graph=j + 1 < n_out)[0] for j in range(n_out)
                 ])
-            contrib = grads * (x - b).unsqueeze(0)  # (n_out, m * nsamples, n_features)
-            phi[idx] = contrib.reshape(n_out, m, nsamples, n_feat).mean(dim=2).permute(1, 2, 0).detach().numpy()
+            contrib = (grads * (x - b).unsqueeze(0)).reshape(n_out, m, nsamples, n_feat).detach()
+            phi[idx] = contrib.mean(dim=2).permute(1, 2, 0).numpy()
+            if split_half:
+                half[idx] = contrib[:, :, 0::2].mean(dim=2).permute(1, 2, 0).numpy()
+        self.split_half_shap = half
         return phi, expected
 
     # ------------------------------------------------------------------ #
@@ -660,7 +678,7 @@ class FeedForwardExplainer(ExplainerBase):
             feature_names=list(self.raw_data.columns),
             analysis="tabular",
             model_type=self.config.get("model_type", "feedforward"),
-            extras={"framework": self.framework},
+            extras={"framework": self.framework, "split_half_shap": getattr(self, "split_half_values", None)},
             chosen_index=getattr(self, "chosen_index", None),
             target_heads=getattr(self, "target_heads", None),
             target_families=getattr(self, "target_families", None),
@@ -685,6 +703,7 @@ class FeedForwardExplainer(ExplainerBase):
             settings["kernel_nsamples"] = self.config.get("kernel_nsamples", "auto")
         elif explainer_type == "gradient":
             settings["gradient_nsamples"] = int(self.config.get("gradient_nsamples", 200))
+            settings["reference_pools"] = self.config.get("reference_pools") is not None
         return annotate(
             result,
             background=self.background_values,
