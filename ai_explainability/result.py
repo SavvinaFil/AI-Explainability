@@ -54,6 +54,16 @@ class ExplanationResult:
         shape, e.g. ARIMA coefficient statistics or the raw SHAP explanation
         object. Callers that need fine-grained access to explainer internals
         should look here.
+    chosen_index:
+        Set when ``explain(..., targets=...)`` was used. Mapping
+        ``{head_name: ndarray (n_samples,)}`` of the output index each head
+        selected per sample. ``shap_values`` / ``predictions`` are then keyed
+        by head (or family) name and hold only the selected output.
+    target_heads:
+        ``{head_name: [output indices]}`` the targets were resolved to.
+    target_families:
+        ``{output_name: [head names]}``; each entry is one explained output
+        (a single head, or several heads summed with ``targets_reduce='sum'``).
     """
 
     shap_values: dict[int, np.ndarray] = field(default_factory=dict)
@@ -70,6 +80,10 @@ class ExplanationResult:
     # ``top_features``: keep the N most important features, computed per output.
     select_features: list[str] | None = None
     top_features: int | None = None
+    # Per-sample targets (explain(..., targets=...)) — see class docstring.
+    chosen_index: dict[str, np.ndarray] | None = None
+    target_heads: dict[str, list[int]] | None = None
+    target_families: dict[str, list[str]] | None = None
 
     # ------------------------------------------------------------------ #
     # Feature selection helper                                            #
@@ -176,6 +190,9 @@ class ExplanationResult:
             when the network mixes continuous and discrete heads (select only
             the discrete columns).
         """
+        if self.chosen_index is not None:
+            return self._stored_choice(among)
+
         keys = list(among) if among is not None else sorted(self.predictions)
         if not keys:
             raise ValueError("No outputs available to choose among.")
@@ -195,6 +212,32 @@ class ExplanationResult:
         for i, pos in enumerate(chosen_pos):
             chosen_shap[i] = np.asarray(self.shap_values[keys[pos]])[i]
         return chosen_idx, chosen_shap
+
+    def _stored_choice(self, among):
+        """Return the choice recorded by a ``targets=`` run for the head matching ``among``."""
+        heads = self.target_heads or {}
+        if among is None:
+            if len(heads) != 1:
+                raise ValueError(
+                    f"This result has several heads {list(heads)}; pass `among`."
+                )
+            name = next(iter(heads))
+        else:
+            wanted = sorted(int(c) for c in among)
+            name = next((h for h, cols in heads.items() if sorted(cols) == wanted), None)
+            if name is None:
+                raise ValueError(
+                    f"Outputs {wanted} do not match any head explained with targets= "
+                    f"({heads})."
+                )
+        # A family may share a head's name yet hold the summed SHAP of several heads.
+        own = (self.target_families or {name: [name]}).get(name) == [name]
+        if not own or name not in self.shap_values:
+            raise ValueError(
+                f"Head {name!r} was summed into a family (targets_reduce='sum'); "
+                "its own SHAP values were not computed."
+            )
+        return np.asarray(self.chosen_index[name]), np.asarray(self.shap_values[name])
 
     def chosen_actions(self, heads: Mapping[str, Any]):
         """Apply :meth:`chosen_output` to several discrete heads at once.
@@ -357,7 +400,7 @@ class ExplanationResult:
         def _label(idx):
             if isinstance(output_labels, dict):
                 return str(output_labels.get(str(idx)) or output_labels.get(idx) or f"output_{idx}")
-            if isinstance(output_labels, (list, tuple)) and idx < len(output_labels):
+            if isinstance(output_labels, (list, tuple)) and isinstance(idx, (int, np.integer)) and idx < len(output_labels):
                 return str(output_labels[idx])
             return f"output_{idx}"
 
