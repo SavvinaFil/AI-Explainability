@@ -64,6 +64,32 @@ class ExplanationResult:
     target_families:
         ``{output_name: [head names]}``; each entry is one explained output
         (a single head, or several heads summed with ``targets_reduce='sum'``).
+    feature_groups:
+        ``{group: [feature names]}`` or a callable ``feature -> group``. Features
+        not in a group are their own group. Dict observations default to one
+        group per top-level key. See :attr:`group_shap_values`.
+    row_labels:
+        Optional callable ``(sample_idx, feature) -> label | None`` naming the
+        real element a feature describes in that sample (e.g. which bus a
+        table row is). See :meth:`label_importance`.
+    cohorts:
+        ``{cohort: boolean mask over samples}``. See :meth:`cohort_importance`.
+    expected_value:
+        ``{output: E[f]}`` — the SHAP baseline per output; an array with one
+        value per sample when samples were explained in groups (``targets=`` /
+        ``frozen_features=``).
+    unmeasurable_features:
+        Features constant over the background and explained data. Their SHAP
+        is zero by construction: not measurable on this data, which is not the
+        same as unimportant.
+    additivity_error:
+        ``{output: {"mean", "max", "relative_max"}}`` of
+        ``|sum(SHAP) + E[f] - f(x)|``. Empty when the explainer's output space
+        can't be compared with ``predictions`` (tree classifiers, which SHAP
+        checks internally).
+    settings:
+        Everything needed to reproduce the run: explainer type, background
+        source and size, seed, ``nsamples``, frozen features, library versions.
     """
 
     shap_values: dict[int, np.ndarray] = field(default_factory=dict)
@@ -84,6 +110,15 @@ class ExplanationResult:
     chosen_index: dict[str, np.ndarray] | None = None
     target_heads: dict[str, list[int]] | None = None
     target_families: dict[str, list[str]] | None = None
+    # Groups, labels and cohorts — see the class docstring.
+    feature_groups: Any = None
+    row_labels: Any = None
+    cohorts: dict[str, np.ndarray] | None = None
+    # Diagnostics — see the class docstring and ai_explainability.diagnostics.
+    expected_value: dict[Any, Any] = field(default_factory=dict)
+    unmeasurable_features: list[str] = field(default_factory=list)
+    additivity_error: dict[Any, dict[str, float]] = field(default_factory=dict)
+    settings: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # Feature selection helper                                            #
@@ -261,6 +296,193 @@ class ExplanationResult:
         return {name: self.chosen_output(among=list(cols)) for name, cols in heads.items()}
 
     # ------------------------------------------------------------------ #
+    # Feature groups (SHAP is additive, so a group's SHAP is the sum of   #
+    # its members' SHAP per sample)                                       #
+    # ------------------------------------------------------------------ #
+    def _group_columns(self) -> dict[str, list[int]]:
+        """Resolve ``feature_groups`` to ``{group: [column indices]}``.
+
+        Features not in any group form a group of their own, so group tables
+        always account for the full attribution.
+        """
+        names = list(self.feature_names)
+        pos = {n: j for j, n in enumerate(names)}
+        spec = self.feature_groups
+        groups: dict[str, list[int]] = {}
+        if callable(spec):
+            for j, n in enumerate(names):
+                g = spec(n)
+                groups.setdefault(str(g) if g is not None else n, []).append(j)
+            return groups
+        assigned = set()
+        for g, members in (spec or {}).items():
+            unknown = [m for m in members if m not in pos]
+            if unknown:
+                raise ValueError(f"feature_groups[{g!r}] has unknown features {unknown[:5]}.")
+            cols = [pos[m] for m in members]
+            dup = assigned.intersection(cols)
+            if dup:
+                raise ValueError(
+                    f"Features {[names[j] for j in sorted(dup)][:5]} are in more than one group."
+                )
+            assigned.update(cols)
+            groups[str(g)] = cols
+        for j, n in enumerate(names):
+            if j not in assigned:
+                if n in groups:
+                    raise ValueError(
+                        f"Group {n!r} has the same name as a feature that is in no group; "
+                        "rename the group or add the feature to it."
+                    )
+                groups[n] = [j]
+        return groups
+
+    @property
+    def group_shap_values(self) -> dict[Any, pd.DataFrame]:
+        """``{output: DataFrame (n_samples, n_groups)}`` — per-sample sum of member SHAP."""
+        return self._tables("group", list(self.shap_values))
+
+    def _tables(self, level, keys) -> dict[Any, pd.DataFrame]:
+        """Per-sample SHAP per group (or feature) for the outputs ``keys`` only."""
+        if level not in ("group", "feature"):
+            raise ValueError("level must be 'group' or 'feature'.")
+        cols = self._group_columns() if level == "group" else None
+        tables = {}
+        for k in keys:
+            v = np.asarray(self.shap_values[k])
+            if v.ndim == 3:  # (n, look_back, features): sum over time too
+                v = v.sum(axis=1)
+            if cols is None:
+                tables[k] = pd.DataFrame(v, columns=self.feature_names or None)
+            else:
+                tables[k] = pd.DataFrame({g: v[:, idx].sum(axis=1) for g, idx in cols.items()})
+        return tables
+
+    def _output_keys(self, outputs=None) -> list:
+        keys = list(self.shap_values) if outputs is None else list(outputs)
+        missing = [k for k in keys if k not in self.shap_values]
+        if missing:
+            raise ValueError(f"Outputs {missing} are not in this result.")
+        return keys
+
+    def _importance(self, level="group", outputs=None, mask=None, tables=None) -> pd.Series:
+        """Mean |SHAP| per group (or feature), summed over ``outputs``, on rows ``mask``.
+
+        ``tables`` (from :meth:`_tables`) avoids recomputing the per-sample
+        tables when several masks or outputs are evaluated in a row.
+        """
+        keys = self._output_keys(outputs)
+        if tables is None:
+            tables = self._tables(level, keys)
+        total = None
+        for k in keys:
+            t = tables[k] if mask is None else tables[k][np.asarray(mask, dtype=bool)]
+            imp = t.abs().mean(axis=0)
+            total = imp if total is None else total + imp
+        return total
+
+    def group_importance(self, outputs=None, normalize=None) -> pd.DataFrame:
+        """Mean |group SHAP| — rows are groups, columns are outputs, sorted by total.
+
+        ``normalize='share'`` divides each column by its sum, which makes
+        outputs (or models) with different logit scales comparable.
+        """
+        keys = self._output_keys(outputs)
+        tables = self._tables("group", keys)
+        table = pd.DataFrame({k: self._importance("group", [k], tables=tables) for k in keys})
+        table = table.loc[table.sum(axis=1).sort_values(ascending=False).index]
+        return _normalize(table, normalize)
+
+    # ------------------------------------------------------------------ #
+    # Per-sample labels (rows that mean different elements per sample)    #
+    # ------------------------------------------------------------------ #
+    def _label_matrix(self) -> np.ndarray:
+        """``(n_samples, n_features)`` object array of ``row_labels(sample, feature)``."""
+        if self.row_labels is None:
+            raise ValueError("No row_labels were given; pass explain(..., row_labels=fn).")
+        # Cached per row_labels function, so reassigning it recomputes.
+        cached = self.extras.get("_label_matrix")
+        if cached is not None and cached[0] is self.row_labels:
+            return cached[1]
+        n = len(next(iter(self.shap_values.values())))
+        mat = np.array(
+            [[self.row_labels(i, f) for f in self.feature_names] for i in range(n)],
+            dtype=object,
+        )
+        self.extras["_label_matrix"] = (self.row_labels, mat)
+        return mat
+
+    def label_shap_values(self, output) -> pd.DataFrame:
+        """Per-sample SHAP summed per real element label — ``(n_samples, n_labels)``.
+
+        Features whose label is ``None`` are left out. An element that doesn't
+        appear in a sample gets 0 there.
+        """
+        labels = self._label_matrix()
+        sv = np.asarray(self.shap_values[output]).reshape(labels.shape)
+        rows = []
+        for i in range(labels.shape[0]):
+            acc: dict[str, float] = {}
+            for lab, v in zip(labels[i], sv[i]):
+                if lab is not None:
+                    acc[lab] = acc.get(lab, 0.0) + float(v)
+            rows.append(acc)
+        return pd.DataFrame(rows).fillna(0.0)
+
+    def label_importance(self, output) -> pd.DataFrame:
+        """Per element label: mean |SHAP| over the samples where it appears, and how often."""
+        labels = self._label_matrix()
+        table = self.label_shap_values(output)
+        present = pd.DataFrame(
+            [{lab: True for lab in labels[i] if lab is not None} for i in range(labels.shape[0])]
+        ).reindex(columns=table.columns).fillna(False).astype(bool)
+        out = pd.DataFrame({
+            "mean_abs_shap": table.abs().where(present).mean(axis=0),
+            "n_samples": present.sum(axis=0),
+        })
+        return out.sort_values("mean_abs_shap", ascending=False)
+
+    # ------------------------------------------------------------------ #
+    # Cohorts (subsets of states)                                         #
+    # ------------------------------------------------------------------ #
+    def by_cohort(self, labels) -> "ExplanationResult":
+        """Return a copy of this result with cohorts set.
+
+        ``labels`` is one label per sample (``['day', 'night', ...]``) or a
+        mapping ``{cohort: boolean mask}``; masks may overlap.
+        """
+        import dataclasses
+
+        return dataclasses.replace(self, cohorts=_resolve_cohorts(labels, self._n_samples()))
+
+    def _n_samples(self) -> int:
+        if self.raw_data_values is not None:
+            return len(self.raw_data_values)
+        return len(next(iter(self.shap_values.values())))
+
+    def cohort_importance(self, level="group", outputs=None, normalize=None) -> pd.DataFrame:
+        """Mean |SHAP| per group (or feature) and cohort; an ``all`` column covers every sample."""
+        keys = self._output_keys(outputs)
+        tables = self._tables(level, keys)
+        cols = {"all": self._importance(level, keys, tables=tables)}
+        for name, mask in (self.cohorts or {}).items():
+            if np.asarray(mask).any():
+                cols[name] = self._importance(level, keys, mask, tables)
+        table = pd.DataFrame(cols)
+        table = table.loc[table["all"].sort_values(ascending=False).index]
+        return _normalize(table, normalize)
+
+    def plot_cohort_heatmap(self, level="group", normalize="share", top=20):
+        """Heatmap of :meth:`cohort_importance`, one panel per output (head family)."""
+        from .comparison import plot_heatmap
+
+        tables = {
+            str(k): self.cohort_importance(level, [k], normalize).head(top)
+            for k in self.shap_values
+        }
+        return plot_heatmap(tables)
+
+    # ------------------------------------------------------------------ #
     # Optional disk persistence                                          #
     # ------------------------------------------------------------------ #
     def save_excel(self, path: str | os.PathLike) -> str:
@@ -309,6 +531,13 @@ class ExplanationResult:
                             sheet_df[f"SHAP_{features[j]}"] = sa[:, j]
 
                 sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+            # Summary sheets: group importance per output, and per cohort.
+            if self.feature_groups is not None:
+                self.group_importance().to_excel(writer, sheet_name="group_importance")
+            if self.cohorts:
+                level = "group" if self.feature_groups is not None else "feature"
+                self.cohort_importance(level=level).to_excel(writer, sheet_name="cohort_importance")
 
         return os.path.abspath(path)
 
@@ -361,6 +590,9 @@ class ExplanationResult:
         output_labels: Any = None,
         max_outputs: int | None = None,
         title: str = "SHAP Interpretation Report",
+        heads: Mapping[str, Any] | None = None,
+        figures: tuple[str, ...] = (),
+        max_categories: int = 10,
     ) -> str:
         """Render a self-contained HTML report — **no Jupyter kernel required**.
 
@@ -379,6 +611,21 @@ class ExplanationResult:
             Optional ``{idx: name}`` dict or list to title each output section.
         max_outputs:
             Cap the number of output sections rendered. ``None`` renders all.
+        heads:
+            ``{head: [output indices]}`` for a result explained on every output:
+            renders one section per action head (the chosen category's SHAP,
+            via :meth:`chosen_output`) instead of one per logit. Results from
+            ``explain(targets=...)`` get head sections automatically.
+        figures:
+            Optional extra figures on the summary page: ``"group_heatmap"``
+            (group share per output) and ``"cohort_heatmap"`` (group share per
+            cohort, one panel per output).
+        max_categories:
+            Per head, how many chosen categories get a collapsible detail table.
+
+        The report opens with a summary page: warnings (unmeasurable features,
+        additivity), group or feature importance overall and per cohort, and
+        the run settings.
         """
         import base64
         import html as _html
@@ -393,16 +640,23 @@ class ExplanationResult:
         path = str(path)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-        out_keys = sorted(self.shap_values)
+        # Integer outputs in index order; named heads keep their own order.
+        out_keys = list(self.shap_values)
+        if all(isinstance(k, (int, np.integer)) for k in out_keys):
+            out_keys = sorted(out_keys)
         if max_outputs is not None:
             out_keys = out_keys[:max_outputs]
 
         def _label(idx):
+            is_int = isinstance(idx, (int, np.integer))
             if isinstance(output_labels, dict):
-                return str(output_labels.get(str(idx)) or output_labels.get(idx) or f"output_{idx}")
-            if isinstance(output_labels, (list, tuple)) and isinstance(idx, (int, np.integer)) and idx < len(output_labels):
+                found = output_labels.get(str(idx)) or output_labels.get(idx)
+                if found:
+                    return str(found)
+            elif isinstance(output_labels, (list, tuple)) and is_int and idx < len(output_labels):
                 return str(output_labels[idx])
-            return f"output_{idx}"
+            # Named heads (explain(targets=...)) are labelled by their own name.
+            return f"output_{idx}" if is_int else str(idx)
 
         def _flatten(idx):
             """Return (shap_2d, data_2d, names, raw_3d_or_None, look_back)."""
@@ -447,9 +701,130 @@ class ExplanationResult:
             return (f'<div class="plot"><h3>{_html.escape(title_txt)}</h3>'
                     f'{_md(text)}<img src="data:image/png;base64,{_b64(fig)}"/></div>')
 
+        def _table(df, fmt="{:.3f}"):
+            """Small DataFrame -> HTML table (index as first column)."""
+            cols = [" / ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in df.columns]
+            head = "".join(f"<th>{_html.escape(c)}</th>" for c in [""] + cols)
+            rows = []
+            for idx, r in df.iterrows():
+                cells = "".join(
+                    f"<td>{fmt.format(v) if isinstance(v, (float, np.floating)) else _html.escape(str(v))}</td>"
+                    for v in r.to_numpy()
+                )
+                rows.append(f"<tr><th>{_html.escape(str(idx))}</th>{cells}</tr>")
+            return f'<table class="tbl"><tr>{head}</tr>{"".join(rows)}</table>'
+
+        def _img(fig):
+            return f'<img src="data:image/png;base64,{_b64(fig)}"/>'
+
+        # ---------------- Summary page ---------------- #
+        has_groups = self.feature_groups is not None
+        level = "group" if has_groups else "feature"
+        summary = []
+        warn_items = []
+        if self.unmeasurable_features:
+            shown = ", ".join(_html.escape(f) for f in self.unmeasurable_features[:20])
+            more = len(self.unmeasurable_features) - 20
+            warn_items.append(
+                f"<li><b>{len(self.unmeasurable_features)} unmeasurable feature(s)</b>: constant "
+                f"over the background and data, so their SHAP is zero by construction "
+                f"(not necessarily unimportant): {shown}{f' and {more} more' if more > 0 else ''}.</li>")
+        tol = self.settings.get("additivity_tolerance")
+        bad = {k: e for k, e in self.additivity_error.items()
+               if tol is not None and e["relative_max"] > tol}
+        if bad:
+            worst = max(bad, key=lambda k: bad[k]["relative_max"])
+            warn_items.append(
+                f"<li><b>Additivity</b>: SHAP deviates from f(x) − E[f] by more than "
+                f"{tol:.0%} for {len(bad)} output(s); worst {_html.escape(_label(worst))} "
+                f"(max error {bad[worst]['max']:.3g}). Check the model wrapper.</li>")
+        if warn_items:
+            summary.append(f'<div class="warn"><h3>Warnings</h3><ul>{"".join(warn_items)}</ul></div>')
+        elif self.settings:
+            additivity = ("SHAP values add up to the model output within tolerance."
+                          if self.additivity_error
+                          else "additivity was not checked for this explainer.")
+            summary.append(f'<div class="ok">No constant features; {additivity}</div>')
+
+        imp = self.cohort_importance(level=level, normalize="share").head(25)
+        what = "group" if has_groups else "feature"
+        summary.append(
+            f"<h3>{what.capitalize()} importance (share of total, all outputs)</h3>"
+            f"<p class='note'>Mean |SHAP| per {what}, summed over the explained outputs and "
+            f"normalised so each column sums to 1. "
+            + ("Columns after <i>all</i> are cohorts. " if self.cohorts else "")
+            + ("Group SHAP is the per-sample sum of its members' SHAP." if has_groups else "")
+            + "</p>" + _table(imp))
+        if has_groups and 1 < len(self.shap_values) <= 12:
+            per_out = self.group_importance(normalize="share").head(25)
+            per_out.columns = [_label(k) for k in per_out.columns]
+            summary.append("<h3>Group importance per output (share)</h3>" + _table(per_out))
+        if "group_heatmap" in figures and has_groups:
+            from .comparison import plot_heatmap
+
+            gi = self.group_importance(normalize="share").head(25)
+            gi = gi.iloc[:, :30]
+            gi.columns = [_label(k) for k in gi.columns]
+            summary.append("<h3>Group heatmap (share per output)</h3>"
+                           + _img(plot_heatmap(gi, title="Group importance per output")))
+        if "cohort_heatmap" in figures and self.cohorts:
+            summary.append("<h3>Cohort heatmap (share, one panel per output)</h3>"
+                           + _img(self.plot_cohort_heatmap(level=level)))
+        if self.settings:
+            rows = pd.DataFrame({"value": {k: str(v) for k, v in self.settings.items()}})
+            summary.append("<details><summary>Run settings</summary>" + _table(rows) + "</details>")
+
+        # ---------------- Output / head sections ---------------- #
+        # A view is one section: an output key, the SHAP to plot, and (for
+        # discrete heads) which category each head chose per sample.
+        views = []
+        if self.chosen_index is not None:
+            for k in out_keys:
+                members = (self.target_families or {}).get(k, [k])
+                views.append((k, _label(k), None,
+                              {h: self.chosen_index[h] for h in members if h in self.chosen_index}))
+        elif heads:
+            for name, cols in list(heads.items())[:max_outputs]:
+                idx, shap_c = self.chosen_output(among=list(cols))
+                views.append((name, str(name), shap_c, {str(name): idx}))
+        else:
+            views = [(k, _label(k), None, None) for k in out_keys]
+
+        def _category_details(shap_2d, names, chosen):
+            """Collapsible per-category tables: top features when that category was chosen."""
+            out = []
+            for h, idx in chosen.items():
+                idx = np.asarray(idx)
+                cats, counts = np.unique(idx, return_counts=True)
+                order = np.argsort(-counts)[:max_categories]
+                dist = pd.DataFrame(
+                    {"chosen in": [f"{c} / {len(idx)}" for c in counts[order]],
+                     "share": counts[order] / len(idx)},
+                    index=[_label(int(c)) for c in cats[order]])
+                parts = [f"<h3>Head {_html.escape(str(h))}: chosen categories</h3>" + _table(dist)]
+                for c in cats[order]:
+                    mask = idx == c
+                    mean_abs = np.abs(shap_2d[mask]).mean(axis=0)
+                    top = np.argsort(-mean_abs)[:10]
+                    t = pd.DataFrame({"mean |SHAP|": mean_abs[top]}, index=[names[j] for j in top])
+                    parts.append(
+                        f"<details><summary>{_html.escape(_label(int(c)))} "
+                        f"&mdash; chosen in {int(mask.sum())} sample(s)</summary>"
+                        f"<p class='note'>Top features when this category was chosen.</p>"
+                        + _table(t) + "</details>")
+                out.append("".join(parts))
+            return "".join(out)
+
         toc, sections = [], []
-        for idx in out_keys:
-            s_flat, d_flat, names, raw3d, look_back = _flatten(idx)
+        for n_view, (key, label, shap_override, chosen) in enumerate(views):
+            if shap_override is not None:
+                s_flat = np.asarray(shap_override)
+                d_flat = np.asarray(self.raw_data_values) if self.raw_data_values is not None else None
+                names = list(self.feature_names or [f"f{i}" for i in range(s_flat.shape[1])])
+                raw3d = look_back = None
+            else:
+                s_flat, d_flat, names, raw3d, look_back = _flatten(key)
+            full_shap, full_names = s_flat, names
             # Trim to the selected / top features for this output.
             sel = self._selected_indices(s_flat, names)
             if len(sel) != len(names):
@@ -458,8 +833,7 @@ class ExplanationResult:
                 names = [names[j] for j in sel]
                 # Temporal plot needs the 3D array; skip it when trimming an LSTM
                 # (time-step aggregation spans all features), to avoid confusion.
-                raw3d = None if raw3d is not None else raw3d
-            label = _label(idx)
+                raw3d = None
             blocks = [
                 _plot_block(rc.BEESWARM_TITLE, rc.BEESWARM_TEXT,
                             rc.fig_beeswarm(s_flat, d_flat, names, f"Impact Distribution: {label}")),
@@ -471,23 +845,28 @@ class ExplanationResult:
                                           rc.fig_temporal(raw3d, look_back, f"Temporal Relevance: {label}")))
             blocks.append(_plot_block(rc.TOP5_TITLE, rc.TOP5_TEXT,
                                       rc.fig_top5(s_flat, names, f"Top 5 Drivers: {label}")))
-            anchor = f"out{idx}"
+            if chosen:
+                blocks.append(_category_details(full_shap, full_names, chosen))
+            anchor = f"out{n_view}"
+            heading = "Head" if chosen else "Analysis for"
             toc.append(f'<li><a href="#{anchor}">{_html.escape(label)}</a></li>')
-            sections.append(f'<section id="{anchor}"><h2>Analysis for: {_html.escape(label)}</h2>'
+            sections.append(f'<section id="{anchor}"><h2>{heading}: {_html.escape(label)}</h2>'
                             + "".join(blocks) + "</section>")
 
         n_samples = (np.asarray(self.raw_data_values).shape[0]
                      if self.raw_data_values is not None else "?")
         meta = (f"analysis: <b>{_html.escape(self.analysis)}</b> &nbsp;&middot;&nbsp; "
                 f"model: <b>{_html.escape(self.model_type)}</b> &nbsp;&middot;&nbsp; "
-                f"outputs: <b>{len(out_keys)}</b> &nbsp;&middot;&nbsp; "
+                f"sections: <b>{len(views)}</b> &nbsp;&middot;&nbsp; "
                 f"samples: <b>{n_samples}</b> &nbsp;&middot;&nbsp; "
                 f"generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         intro = (
             "<p><strong>SHAP (SHapley Additive exPlanations)</strong> decomposes each "
             "prediction into the contribution of every input feature. A positive SHAP "
-            "value pushes the output higher; a negative one pushes it lower. Each "
-            "section below explains one model output.</p>"
+            "value pushes the output higher; a negative one pushes it lower. The "
+            "summary comes first; each later section explains one "
+            + ("action head (the category the agent chose)" if any(v[3] for v in views)
+               else "model output") + ".</p>"
         )
         html_doc = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/>
@@ -507,12 +886,20 @@ class ExplanationResult:
  .plot p{{margin:4px 0;font-size:13px;color:#475569}} .plot ul{{margin:4px 0 8px 18px;font-size:13px;color:#475569}}
  .plot img{{max-width:100%;width:640px;border:1px solid #edf0f3;border-radius:6px;display:block;margin-top:8px}}
  footer{{color:#94a3b8;font-size:12px;padding:16px 28px;border-top:1px solid #e2e8f0}}
+ .summary h3{{font-size:15px;margin:18px 0 6px}} .note{{font-size:12px;color:#64748b;margin:2px 0 6px}}
+ .tbl{{border-collapse:collapse;font-size:12px;margin:6px 0 10px}}
+ .tbl th,.tbl td{{border:1px solid #e2e8f0;padding:3px 8px;text-align:right}} .tbl th{{background:#f5f7fa;text-align:left}}
+ .warn{{background:#fff7ed;border:1px solid #fdba74;border-radius:8px;padding:8px 16px;font-size:13px}}
+ .warn h3{{margin:4px 0}} .ok{{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:8px 16px;font-size:13px}}
+ details{{margin:4px 0;font-size:13px}} summary{{cursor:pointer;color:#2c3e50}}
+ section img, .summary img{{max-width:100%;border:1px solid #edf0f3;border-radius:6px}}
 </style></head>
 <body>
 <header><h1>{_html.escape(title)}</h1><div class="meta">{meta}</div></header>
 <div class="wrap">
 <div class="intro">{intro}</div>
-<nav><h3>Outputs</h3><ul>{''.join(toc)}</ul></nav>
+<nav><h3>Sections</h3><ul><li><a href="#summary">Summary</a></li>{''.join(toc)}</ul></nav>
+<section id="summary" class="summary"><h2>Summary</h2>{''.join(summary)}</section>
 {''.join(sections)}
 </div>
 <footer>Generated by ai-explainability &middot; kernel-free HTML report (same sections as the .ipynb report).</footer>
@@ -528,3 +915,35 @@ class ExplanationResult:
     def timestamped_filename(self, stem: str, ext: str) -> str:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{stem}_{self.model_type}_{ts}.{ext.lstrip('.')}"
+
+
+# ---------------------------------------------------------------------- #
+# Module helpers                                                          #
+# ---------------------------------------------------------------------- #
+def _normalize(table: pd.DataFrame, normalize) -> pd.DataFrame:
+    """``None`` keeps raw values; ``'share'`` divides each column by its sum."""
+    if normalize is None:
+        return table
+    if normalize != "share":
+        raise ValueError(f"normalize must be None or 'share'; got {normalize!r}.")
+    sums = table.sum(axis=0).replace(0, np.nan)
+    return table / sums
+
+
+def _resolve_cohorts(labels, n: int) -> dict[str, np.ndarray]:
+    """``{name: mask}`` or one label per sample -> ``{name: bool mask of length n}``."""
+    if isinstance(labels, Mapping):
+        out = {}
+        for name, mask in labels.items():
+            mask = np.asarray(mask, dtype=bool).ravel()
+            if len(mask) < n:
+                raise ValueError(f"Cohort {name!r} mask has {len(mask)} entries, expected {n}.")
+            # Longer masks are allowed: explain() may have explained a prefix
+            # of the data (dataset_scope='subset').
+            out[str(name)] = mask[:n]
+        return out
+    arr = np.asarray(labels).ravel()
+    if len(arr) < n:
+        raise ValueError(f"Got {len(arr)} cohort labels for {n} samples.")
+    arr = arr[:n]
+    return {str(v): arr == v for v in pd.unique(arr)}

@@ -50,6 +50,11 @@ def _slice_native_output(shap_out, idx):
 class RFExplainer(ExplainerBase):
     """Tree-based explainer (RandomForest, XGBoost, DecisionTree, …).
 
+    Baseline: without ``background_data`` TreeSHAP uses the path-dependent
+    tree statistics (cover of the training data stored in the trees). With
+    ``background_data`` it switches to ``feature_perturbation="interventional"``
+    and attributes relative to those reference rows instead.
+
     Supports two usage patterns:
 
     1. **Legacy / CLI** — config-driven, with ``model_path`` and
@@ -107,6 +112,8 @@ class RFExplainer(ExplainerBase):
 
         self.all_shap_values = {}
         self.all_predictions = {}
+        self.expected_values = {}
+        background = self._background_df = self._resolve_background()
 
         # 3. Dispatch: MultiOutput wrapper vs native multi-output.
         #
@@ -132,21 +139,57 @@ class RFExplainer(ExplainerBase):
             for idx in targets:
                 print(f"Explaining target index: {idx}...")
                 sub_model = self.model.estimators_[idx]
-                shap_out = shap.TreeExplainer(sub_model).shap_values(self.raw_data)
+                explainer = self._tree_explainer(sub_model, background)
+                shap_out = explainer.shap_values(self.raw_data)
                 self.all_shap_values[idx] = _collapse_wrapper_output(shap_out)
                 self.all_predictions[idx] = self._predict_for_target(idx)
+                ev = np.atleast_1d(explainer.expected_value)
+                # Same convention as _collapse_wrapper_output: class 1 if binary.
+                self.expected_values[idx] = float(ev[1] if len(ev) > 1 else ev[0])
         else:
             # Native model — call TreeExplainer once, slice per-target. This
             # both fixes the IndexError from ``estimators_[idx]`` and avoids
             # recomputing the same 3D SHAP array N times.
             print(f"Explaining native model for targets: {list(targets)}...")
-            shap_out = shap.TreeExplainer(self.model).shap_values(self.raw_data)
+            explainer = self._tree_explainer(self.model, background)
+            shap_out = explainer.shap_values(self.raw_data)
+            ev = np.atleast_1d(explainer.expected_value)
             for idx in targets:
                 self.all_shap_values[idx] = _slice_native_output(shap_out, idx)
                 self.all_predictions[idx] = self._predict_for_target(idx)
+                # Same convention as _slice_native_output.
+                if len(ev) == 1:
+                    self.expected_values[idx] = float(ev[0])
+                else:
+                    self.expected_values[idx] = float(ev[idx] if idx < len(ev) else ev[1])
 
         # Compatibility for the notebook
         self.shap_values = self.all_shap_values[targets[0]]
+
+    def _resolve_background(self):
+        """Return the explicit background as a DataFrame, or ``None`` for the default."""
+        if self.background_data is None and not self.get_path("background_data_path"):
+            self.background_source = "path-dependent tree statistics (no background)"
+            return None
+        from ai_explainability.io import to_pandas
+
+        src = self.background_data
+        if src is None:
+            src = self.get_path("background_data_path")
+        # An ndarray background takes the explained data's column names.
+        columns = list(self.raw_data.columns)
+        bg = to_pandas(src, feature_names=self.feature_names or columns)
+        bg = bg[columns]
+        self.background_source = f"background_data (interventional, {len(bg)} rows)"
+        return bg
+
+    @staticmethod
+    def _tree_explainer(model, background):
+        if background is None:
+            return shap.TreeExplainer(model)
+        return shap.TreeExplainer(
+            model, data=background, feature_perturbation="interventional"
+        )
 
     # ------------------------------------------------------------------ #
     # Small helper — kept as a method so it can reuse ``self.model``     #
@@ -171,9 +214,10 @@ class RFExplainer(ExplainerBase):
         Imported lazily so this module doesn't depend on the shim package
         (avoids a circular import in development setups).
         """
+        from ai_explainability.diagnostics import annotate
         from ai_explainability.result import ExplanationResult
 
-        return ExplanationResult(
+        result = ExplanationResult(
             shap_values=dict(self.all_shap_values),
             predictions=dict(getattr(self, "all_predictions", {})),
             raw_data=self.raw_data,
@@ -181,6 +225,21 @@ class RFExplainer(ExplainerBase):
             feature_names=list(self.raw_data.columns),
             analysis="tabular",
             model_type=self.config.get("model_type", ""),
+        )
+        background = getattr(self, "_background_df", None)
+        return annotate(
+            result,
+            background=None if background is None else background.to_numpy(),
+            expected_values=getattr(self, "expected_values", None),
+            settings={
+                "explainer_type": "tree",
+                "background": getattr(self, "background_source", None),
+                "n_samples_explained": len(self.raw_data_values),
+            },
+            tolerance=self.config.get("additivity_tolerance"),
+            # Classifier predictions are labels, while TreeSHAP explains
+            # probabilities / margins; SHAP checks tree additivity itself.
+            check_additivity=not self.is_classification,
         )
 
     # ------------------------------------------------------------------ #

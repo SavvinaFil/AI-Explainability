@@ -12,9 +12,12 @@ class ExplainerBase(ABC):
     filesystem zero times.
     """
 
-    def __init__(self, config, *, model=None, data=None):
+    def __init__(self, config, *, model=None, data=None, background_data=None):
         self.config = config
         self.model = model
+        # Optional SHAP baseline samples; ``None`` lets each explainer pick its
+        # default (see the explainer's docstring).
+        self.background_data = background_data
         self.shap_values = None
         # ``raw_data`` is the pandas view used for feature naming / display.
         # The caller can pass a DataFrame, ndarray, pyspark.sql.DataFrame, etc.

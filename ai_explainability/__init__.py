@@ -32,6 +32,8 @@ __all__ = [
     "resolve_config",
     "ModelProfile",
     "FieldSpec",
+    "compare",
+    "plot_heatmap",
 ]
 
 
@@ -116,6 +118,13 @@ def __getattr__(name: str):
         mod = importlib.import_module(mod_name)
         value = getattr(mod, attr)
         globals()[name] = value  # cache for subsequent accesses
+        return value
+
+    if name in ("compare", "plot_heatmap"):
+        from . import comparison as _cmp
+
+        value = getattr(_cmp, name)
+        globals()[name] = value
         return value
 
     if name == "ExplanationResult":

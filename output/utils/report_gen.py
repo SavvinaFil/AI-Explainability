@@ -231,6 +231,9 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
 
     # 4. Loop Through Targets
     for target_idx in all_shap_data.keys():
+        # Key as the notebook's all_shap_dict parses it back from the .npz
+        # (digit-only names become ints), so lookups match.
+        nb_key = int(target_idx) if str(target_idx).lstrip("-").isdigit() else str(target_idx)
         # Resolve correct label for each target — handles all 3 shapes
         if isinstance(output_labels, list):
             # Shape C — LSTM: ["PV"]
@@ -257,7 +260,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
         cells.append(nbf.v4.new_markdown_cell(f"### {rc.BEESWARM_TITLE}\n\n{rc.BEESWARM_TEXT}"))
 
         cells.append(nbf.v4.new_code_cell(
-            f"current_shap_raw = np.array(all_shap_dict[{repr(target_idx)}])\n"
+            f"current_shap_raw = np.array(all_shap_dict[{repr(nb_key)}])\n"
             f"s_flat, d_flat, names = get_flattened_data(current_shap_raw)\n"
             f'fig_beeswarm(s_flat, d_flat, names, "Impact Distribution: {label}")\n'
             f"plt.show()"
@@ -276,7 +279,7 @@ print(f"Setup complete. Targets to explain: {{list(all_shap_dict.keys())}}")
             cells.append(nbf.v4.new_markdown_cell(f"### {rc.TEMPORAL_TITLE}\n\n{rc.TEMPORAL_TEXT}"))
 
             cells.append(nbf.v4.new_code_cell(
-                f"current_shap_raw = np.array(all_shap_dict[{repr(target_idx)}])\n"
+                f"current_shap_raw = np.array(all_shap_dict[{repr(nb_key)}])\n"
                 f'fig_temporal(current_shap_raw, {look_back}, "Temporal Relevance: {label}")\n'
                 f"plt.show()"
             ))

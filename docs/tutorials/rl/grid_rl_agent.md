@@ -228,19 +228,88 @@ you can pass the raw network.
 
 ---
 
+### Checks before drawing conclusions
+
+Every result carries:
+
+```python
+result.unmeasurable_features  # constant over background + states: SHAP is 0 by construction
+result.additivity_error       # per output: |sum(SHAP) + E[f] - f(x)|, mean / max
+result.settings               # explainer, background source/size, seed, versions
+```
+
+A feature in `unmeasurable_features` (e.g. a violation share that is always 0 in
+your states) can't be measured on this data. That doesn't mean the agent ignores
+it. A large additivity error usually means the model wrapper returns something
+other than what was explained. To explain relative to a meaningful reference,
+such as "quiet grid" states, pass it as `background_data`.
+
+---
+
+## 5b. Groups, structured observations and cohorts
+
+Per-feature SHAP can hide what matters: 32 bus voltages that each look minor
+can, summed, be the agent's main driver. SHAP is additive, so a group's SHAP is
+the sum of its members':
+
+```python
+result = aie.explain(
+    ..., targets=heads,
+    feature_groups={"voltage": [f"vm_{i}" for i in range(32)], "load": LOAD_COLS},
+    cohorts={"day": is_day, "night": ~is_day},     # boolean masks over states
+)
+result.group_importance(normalize="share")         # groups x heads
+result.cohort_importance()                         # groups x (all, day, night)
+result.plot_cohort_heatmap()                       # one panel per head
+```
+
+**Dict observations.** Pass the observation dict as `data`. It is flattened in
+key order, the model receives the rebuilt dict, and every key becomes a group:
+
+```python
+result = aie.explain(
+    model=policy_module,                           # forward(obs_dict) -> logits
+    data={"bus": bus_obs, "line": line_obs, "bus_mask": mask},   # (n, rows, cols) arrays
+    model_type="rl_policy", package="pytorch", explainer_type="deep",
+    field_names={"bus": ["vm", "va"], "line": ["p", "q", "rho"]},  # names: bus[3].vm
+    frozen_features=["bus_mask"],                  # held fixed, never attributed
+    row_labels=lambda i, f: bus_id[i, int(f[4:f.index("]")])] if f.startswith("bus[") else None,
+    targets=heads,
+)
+result.label_importance("tap")                     # importance per real bus, across steps
+```
+
+`frozen_features` keeps masks and validity flags at each state's own value
+(their SHAP is exactly zero). `row_labels` maps a table row to the real element
+it holds in that state, for tables like "the 32 worst buses of this step".
+
+**Comparing agents.** Logit scales differ between networks, so compare shares:
+
+```python
+table = aie.compare({"fnn": res_fnn, "entity": res_entity}, groups=GROUPS)
+aie.plot_heatmap(table)                            # groups x (agent, cohort)
+```
+
+---
+
 ## 6. Saving a report
 
 By default an in-memory run writes nothing. For an RL policy with many action
-outputs, the **kernel-free HTML report** is recommended — it renders directly
+outputs, the **kernel-free HTML report** is recommended. It renders directly
 with matplotlib (no Jupyter kernel, so it can't hit the kernel/zmq crashes seen
-on some Windows setups) and gives one section per action:
+on some Windows setups). It opens with a summary page (warnings, group and
+cohort importance, run settings), then has one section per action head: the
+chosen-category distribution, plots, and a collapsible top-feature table per
+category:
 
 ```python
 result.save_report_html(
     "output/grid_agent_report.html",
     output_labels=labels,   # names each action logit, e.g. "P_gen1=L0"
-    max_outputs=None,       # cap sections if the policy has many logits
+    figures=("group_heatmap", "cohort_heatmap"),   # optional
 )
+# For a result explained on every logit, group the sections by head:
+full_result.save_report_html("report.html", output_labels=labels, heads=heads)
 ```
 
 See [`output/report_rl_agent_example.html`](../../../output/report_rl_agent_example.html)

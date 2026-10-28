@@ -17,8 +17,12 @@ DataFrame (plus an optional ``background_data``) and get an
 ``to_dataframe()`` / ``save_excel()`` behave identically.
 """
 
+from collections.abc import Mapping
+
 import numpy as np
+import pandas as pd
 import shap
+from tqdm.auto import tqdm
 
 from ..tree_based.base import ExplainerBase
 
@@ -33,8 +37,7 @@ class FeedForwardExplainer(ExplainerBase):
     # Setup                                                              #
     # ------------------------------------------------------------------ #
     def __init__(self, config, *, model=None, data=None, background_data=None):
-        super().__init__(config, model=model, data=data)
-        self.background_data = background_data
+        super().__init__(config, model=model, data=data, background_data=background_data)
         self.framework = None
 
     def load_model(self):
@@ -106,14 +109,24 @@ class FeedForwardExplainer(ExplainerBase):
                 f"FeedForwardExplainer. Choose one of {self.SUPPORTED_EXPLAINERS}."
             )
 
-        # 1. Coerce the data to explain.
-        if self.raw_data is None:
+        # 1. Coerce the data to explain. A mapping of arrays (dict observation)
+        #    is flattened in a documented order and the model is wrapped so it
+        #    receives the rebuilt dict (see ai_explainability.structured).
+        self.layout = None
+        if isinstance(self.raw_data, Mapping):
+            from ai_explainability.structured import DictLayout
+
+            self.layout = DictLayout(self.raw_data, self.config.get("field_names"))
+            X_flat = self.layout.flatten(self.raw_data)
+            self.raw_data = pd.DataFrame(X_flat, columns=self.layout.feature_names)
+            self.model = self.layout.wrap_model(self.model, self.framework)
+        elif self.raw_data is None:
             self.raw_data = to_pandas(
                 self.get_path("dataset_path"), feature_names=self.feature_names
             )
         else:
             self.raw_data = to_pandas(self.raw_data, feature_names=self.feature_names)
-        if self.feature_names:
+        if self.feature_names and self.layout is None:
             self.raw_data = self.raw_data[self.feature_names]
         if self.config.get("dataset_scope") == "subset":
             self.raw_data = self.raw_data.iloc[: self.config.get("subset_end", 100)]
@@ -123,6 +136,12 @@ class FeedForwardExplainer(ExplainerBase):
 
         # 2. Build a background / baseline distribution appropriate to the backend.
         background = self._resolve_background(X, explainer_type)
+        # Plain rows for the diagnostics and frozen-feature groups (a k-means
+        # DenseData summary keeps its centroid rows in ``.data``; an ndarray's
+        # own ``.data`` is its raw buffer, so it is used as-is).
+        self.background_values = np.asarray(
+            background if isinstance(background, np.ndarray) else background.data
+        )
 
         # 3. Predict once to learn the output width (= number of action
         #    components for an RL policy) and capture per-output predictions.
@@ -130,49 +149,20 @@ class FeedForwardExplainer(ExplainerBase):
         preds_all = np.asarray(predict_fn(X))
         if preds_all.ndim == 1:
             preds_all = preds_all.reshape(-1, 1)
-        n_outputs = preds_all.shape[1]
-        self.n_outputs = n_outputs
+        self.n_outputs = preds_all.shape[1]
 
-        # Per-sample targets (RL): explain only the selected output(s) per
-        # sample instead of every output column.
-        if self.config.get("targets") is not None:
-            self._explain_selected_targets(
-                X, background, explainer_type, preds_all, predict_fn
-            )
-            return
+        # 4. Explain. Samples are grouped by everything that must stay fixed
+        #    per sample (chosen action, frozen feature values) and SHAP runs
+        #    once per group; without targets / frozen features that is a
+        #    single run over all samples.
+        self._explain_grouped(X, background, explainer_type, preds_all, predict_fn)
 
-        # Which outputs (actions / setpoints) to explain. Default: all of them.
-        targets = self.config.get("target_index")
-        if targets is None:
-            targets = list(range(n_outputs))
-        elif isinstance(targets, (int, np.integer)):
-            targets = [int(targets)]
-        else:
-            targets = [int(t) for t in targets]
+    def _run_shap(self, model, predict_fn, background, X, explainer_type, n_outputs):
+        """Run one SHAP backend on ``X``.
 
-        # 4. Compute SHAP once, then split into one 2D array per output. This is
-        #    framework- and action-type-agnostic: continuous setpoints and
-        #    discrete logits are both just output columns.
-        shap_raw = self._run_shap(self.model, predict_fn, background, X, explainer_type)
-        per_output = self._split_outputs(shap_raw, n_outputs)
-
-        # 5. Keep only the requested outputs.
-        self.all_shap_values = {}
-        self.all_predictions = {}
-        for idx in targets:
-            if idx not in per_output:
-                raise ValueError(
-                    f"target_index {idx} is out of range for a model with "
-                    f"{n_outputs} output(s)."
-                )
-            self.all_shap_values[idx] = per_output[idx]
-            self.all_predictions[idx] = preds_all[:, idx]
-
-        # Compatibility for the notebook generator.
-        self.shap_values = self.all_shap_values[targets[0]]
-
-    def _run_shap(self, model, predict_fn, background, X, explainer_type):
-        """Build the requested SHAP backend and return its raw output for ``X``."""
+        Returns ``(per_output, expected)``: ``{output: (n, features)}`` arrays
+        and the ``(n_outputs,)`` baseline ``E[f]`` of that run.
+        """
         if explainer_type == "gradient" and self.framework == "pytorch":
             n_outputs = int(np.asarray(predict_fn(X[:1])).reshape(1, -1).shape[1])
             cols = np.broadcast_to(np.arange(n_outputs), (len(X), n_outputs))
@@ -180,16 +170,24 @@ class FeedForwardExplainer(ExplainerBase):
         if explainer_type == "kernel":
             explainer = shap.KernelExplainer(predict_fn, background)
             nsamples = self.config.get("kernel_nsamples", "auto")
-            return explainer.shap_values(X, nsamples=nsamples)
-        if explainer_type == "gradient":
-            explainer = shap.GradientExplainer(
-                model, self._as_framework_tensor(background)
+            raw = explainer.shap_values(X, nsamples=nsamples)
+            expected = np.ravel(np.asarray(explainer.expected_value, dtype=float))
+        elif explainer_type == "gradient":
+            explainer = shap.GradientExplainer(model, self._as_framework_tensor(background))
+            raw = explainer.shap_values(
+                self._as_framework_tensor(X),
+                nsamples=int(self.config.get("gradient_nsamples", 200)),
             )
+            # Expected gradients has no closed-form baseline; use E[f(background)].
+            expected = np.asarray(predict_fn(background), dtype=float).reshape(
+                len(background), -1).mean(axis=0)
         else:  # "deep"
-            explainer = shap.DeepExplainer(
-                model, self._as_framework_tensor(background)
-            )
-        return explainer.shap_values(self._as_framework_tensor(X))
+            explainer = shap.DeepExplainer(model, self._as_framework_tensor(background))
+            raw = explainer.shap_values(self._as_framework_tensor(X))
+            ev = explainer.expected_value
+            ev = ev.detach().cpu().numpy() if hasattr(ev, "detach") else ev
+            expected = np.ravel(np.asarray(ev, dtype=float))
+        return self._split_outputs(raw, n_outputs), expected
 
     # ------------------------------------------------------------------ #
     # Per-sample targets (explain only the action taken)                  #
@@ -289,85 +287,271 @@ class FeedForwardExplainer(ExplainerBase):
             return tf.keras.Model(inputs=self.model.inputs, outputs=out)
         return None  # callable: only the kernel path, via the predict fn.
 
-    def _explain_selected_targets(self, X, background, explainer_type, preds_all, base_predict):
-        """Explain, per sample, only the output each head actually selected.
+    def _resolve_target_index(self, n_outputs):
+        """Normalise ``config['target_index']`` to a list of output columns (default: all)."""
+        targets = self.config.get("target_index")
+        if targets is None:
+            return list(range(n_outputs))
+        if isinstance(targets, (int, np.integer)):
+            targets = [int(targets)]
+        targets = [int(t) for t in targets]
+        bad = [t for t in targets if not 0 <= t < n_outputs]
+        if bad:
+            raise ValueError(
+                f"target_index {bad} is out of range for a model with {n_outputs} output(s)."
+            )
+        return targets
 
-        The argmax of every head is computed once on ``X`` (no gradients).
-        Samples are then grouped by their chosen-index tuple and SHAP runs once
-        per group on a wrapped model that returns only those logits (or their
-        per-family sums). The selection is therefore fixed per explained
-        sample, never re-derived on SHAP's perturbed or interpolated inputs.
+    def _resolve_frozen(self, names):
+        """Column indices of ``config['frozen_features']``; a dict-input key expands to all its columns."""
+        frozen = self.config.get("frozen_features") or []
+        if isinstance(frozen, str):
+            frozen = [frozen]
+        groups = self.layout.groups if self.layout is not None else {}
+        cols = []
+        for f in frozen:
+            members = groups.get(str(f), [f])
+            unknown = [m for m in members if m not in names]
+            if unknown:
+                raise ValueError(f"frozen_features: unknown feature(s) {unknown}.")
+            cols.extend(names.index(m) for m in members)
+        return sorted(set(cols))
+
+    def _explain_grouped(self, X, background, explainer_type, preds_all, base_predict):
+        """Explain every sample, grouped by what must stay fixed per sample.
+
+        - **Targets** (``targets=``): the argmax of every head is computed once
+          on ``X`` (no gradients) and SHAP runs on a wrapped model that returns
+          only the chosen logits (or their per-family sums). The selection is
+          fixed per explained sample, never re-derived on SHAP's perturbed or
+          interpolated inputs.
+        - **Frozen features** (``frozen_features=``): masks / validity flags are
+          set to the explained sample's own value in the background, so they
+          are held fixed instead of attributed (their SHAP is exactly zero).
+
+        Samples sharing the same chosen actions and frozen values form one
+        group, and SHAP runs once per group. The baseline ``E[f]`` therefore
+        differs per group and is stored per sample.
         """
-        n_outputs = preds_all.shape[1]
-        heads = self._resolve_target_heads(n_outputs)
-        head_names = list(heads)
-        families = self._resolve_families(head_names)
-        fam_names = list(families)
-        head_pos = {h: i for i, h in enumerate(head_names)}
-
-        # (n, n_heads) original output index chosen by each head.
-        chosen = np.column_stack(
-            [np.asarray(heads[h])[preds_all[:, heads[h]].argmax(axis=1)] for h in head_names]
-        )
-
         n, n_feat = X.shape
-        shap_out = {f: np.zeros((n, n_feat), dtype=float) for f in fam_names}
-        pred_out = {f: np.zeros(n, dtype=float) for f in fam_names}
+        n_outputs = preds_all.shape[1]
+        names = list(self.raw_data.columns)
+        frozen_idx = self._resolve_frozen(names)
+        self.frozen_features = [names[j] for j in frozen_idx]
 
-        self.chosen_index = {h: chosen[:, head_pos[h]] for h in head_names}
-        self.target_heads = heads
-        self.target_families = families
+        if self.config.get("targets") is not None:
+            heads = self._resolve_target_heads(n_outputs)
+            head_names = list(heads)
+            families = self._resolve_families(head_names)
+            out_keys = list(families)
+            head_pos = {h: i for i, h in enumerate(head_names)}
+            # (n, n_heads) original output index chosen by each head.
+            chosen = np.column_stack(
+                [np.asarray(heads[h])[preds_all[:, heads[h]].argmax(axis=1)] for h in head_names]
+            )
+        else:
+            heads = families = None
+            out_keys = self._resolve_target_index(n_outputs)
+            chosen = np.zeros((n, 0), dtype=int)
 
-        if explainer_type == "gradient" and self.framework == "pytorch":
-            # The choice travels with each sample, so every sample is explained in one batched run instead of one
-            # SHAP run per distinct action combination.
-            fam_matrix = np.zeros((len(head_names), len(fam_names)), dtype="float32")
-            for j, fam in enumerate(fam_names):
-                for h in families[fam]:
-                    fam_matrix[head_pos[h], j] = 1.0
-            phi = self._expected_gradients_torch(self.model, background, X, chosen, fam_matrix)
-            sel_preds = np.take_along_axis(preds_all, chosen, axis=1) @ fam_matrix
-            for j, fam in enumerate(fam_names):
-                shap_out[fam] = phi[:, :, j]
-                pred_out[fam] = sel_preds[:, j]
-            self.all_shap_values = shap_out
-            self.all_predictions = pred_out
-            self.n_groups = 1
-            print(f"Explained {len(fam_names)} selected output(s) instead of {n_outputs} "
-                  f"(one batched expected-gradients run over {n} sample(s)).")
-            self.shap_values = self.all_shap_values[fam_names[0]]
-            return
+        group_key = np.concatenate([chosen.astype("float64"), X[:, frozen_idx]], axis=1)
+        if group_key.shape[1] == 0:
+            groups, inverse = np.zeros((1, 0)), np.zeros(n, dtype=int)
+        else:
+            groups, inverse = np.unique(group_key, axis=0, return_inverse=True)
+            inverse = np.asarray(inverse).ravel()
 
-        groups, inverse = np.unique(chosen, axis=0, return_inverse=True)
-        inverse = np.asarray(inverse).ravel()
-        for g, combo in enumerate(groups):
+        # Frozen columns are overwritten per group, so a k-means summary is
+        # replaced by its (plain) centroid rows.
+        bg_rows = np.asarray(self.background_values, dtype="float32")
+
+        shap_out = {k: np.zeros((n, n_feat), dtype=float) for k in out_keys}
+        pred_out = {k: np.zeros(n, dtype=float) for k in out_keys}
+        ev_out = {k: np.zeros(n, dtype=float) for k in out_keys}
+
+        batched = explainer_type == "gradient" and self.framework == "pytorch"
+        if batched:
+            # The chosen outputs and frozen values travel with each sample, so every sample is explained in one
+            # batched run instead of one SHAP run per group.
+            if heads is not None:
+                cols = chosen
+                fam_matrix = np.zeros((len(head_names), len(out_keys)), dtype="float32")
+                for j, fam in enumerate(out_keys):
+                    for h in families[fam]:
+                        fam_matrix[head_pos[h], j] = 1.0
+            else:
+                cols = np.broadcast_to(np.asarray(out_keys, dtype=int), (n, len(out_keys)))
+                fam_matrix = None
+            phi, expected = self._expected_gradients_torch(self.model, bg_rows, X, cols, fam_matrix, frozen_idx)
+            sel_preds = np.take_along_axis(preds_all, np.asarray(cols), axis=1)
+            if fam_matrix is not None:
+                sel_preds = sel_preds @ fam_matrix
+            if self.split_half_shap is not None:
+                self.split_half_values = {k: self.split_half_shap[:, :, j] for j, k in enumerate(out_keys)}
+            for j, k in enumerate(out_keys):
+                shap_out[k] = phi[:, :, j].astype(float)
+                pred_out[k] = sel_preds[:, j]
+                ev_out[k] = expected[:, j]
+            groups = np.zeros((1, 0))
+
+        # Otherwise one SHAP run per group; with many heads nearly every sample is its own group, so show progress
+        progress = tqdm(
+            range(0 if batched else len(groups)), desc="SHAP", unit="group",
+            disable=not self.config.get("verbose", True) or len(groups) == 1,
+        )
+        for g in progress:
             rows = np.flatnonzero(inverse == g)
-            S = np.zeros((n_outputs, len(fam_names)), dtype="float32")
-            for j, fam in enumerate(fam_names):
-                for h in families[fam]:
-                    # += so two heads in one family picking the same column count twice.
-                    S[combo[head_pos[h]], j] += 1.0
+            bg = background
+            if frozen_idx:
+                bg = bg_rows.copy()
+                bg[:, frozen_idx] = X[rows[0], frozen_idx]
 
-            def predict_fn(x, _S=S):
-                p = np.asarray(base_predict(x))
-                return (p.reshape(len(p), -1) @ _S).astype("float32")
+            if heads is not None:
+                combo = chosen[rows[0]]
+                S = np.zeros((n_outputs, len(out_keys)), dtype="float32")
+                for j, fam in enumerate(out_keys):
+                    for h in families[fam]:
+                        # += so two heads in one family picking the same column count twice.
+                        S[combo[head_pos[h]], j] += 1.0
 
-            model = None if explainer_type == "kernel" else self._selection_model(S)
-            shap_raw = self._run_shap(model, predict_fn, background, X[rows], explainer_type)
-            per_output = self._split_outputs(shap_raw, len(fam_names))
-            sel_preds = preds_all[rows] @ S
-            for j, fam in enumerate(fam_names):
-                shap_out[fam][rows] = np.asarray(per_output[j]).reshape(len(rows), n_feat)
-                pred_out[fam][rows] = sel_preds[:, j]
+                def predict_fn(x, _S=S):
+                    p = np.asarray(base_predict(x))
+                    return (p.reshape(len(p), -1) @ _S).astype("float32")
+
+                model = None if explainer_type == "kernel" else self._selection_model(S)
+                per_output, expected = self._run_shap(
+                    model, predict_fn, bg, X[rows], explainer_type, len(out_keys))
+                sel_preds = preds_all[rows] @ S
+                cols = {k: j for j, k in enumerate(out_keys)}
+            else:
+                per_output, expected = self._run_shap(
+                    self.model, base_predict, bg, X[rows], explainer_type, n_outputs)
+                sel_preds = preds_all[rows]
+                cols = {k: k for k in out_keys}
+
+            for k, c in cols.items():
+                shap_out[k][rows] = np.asarray(per_output[c]).reshape(len(rows), n_feat)
+                pred_out[k][rows] = sel_preds[:, c]
+                ev_out[k][rows] = expected[c] if expected.size > c else expected[0]
 
         self.all_shap_values = shap_out
         self.all_predictions = pred_out
+        # One baseline per output when there was a single group, else per sample.
+        self.expected_values = {
+            k: (float(v[0]) if np.allclose(v, v[0]) else v) for k, v in ev_out.items()
+        }
         self.n_groups = len(groups)
-        print(
-            f"Explained {len(fam_names)} selected output(s) instead of {n_outputs} "
-            f"({len(groups)} distinct action combination(s))."
-        )
-        self.shap_values = self.all_shap_values[fam_names[0]]
+        if heads is not None:
+            self.chosen_index = {h: chosen[:, head_pos[h]] for h in head_names}
+            self.target_heads = heads
+            self.target_families = families
+            print(
+                f"Explained {len(out_keys)} selected output(s) instead of {n_outputs} "
+                + (f"(one batched expected-gradients run over {n} sample(s))." if batched
+                   else f"({len(groups)} group(s) of samples).")
+            )
+        # Compatibility for the notebook generator.
+        self.shap_values = self.all_shap_values[out_keys[0]]
+
+    def _expected_gradients_torch(self, model, background, X, cols, fam_matrix=None, frozen_idx=()):
+        """Batched expected gradients (the estimator behind ``shap.GradientExplainer``) for PyTorch.
+
+        For every sample ``x`` it draws ``gradient_nsamples`` background rows ``b`` and points ``t ~ U(0, 1)`` and
+        averages ``grad f(b + t (x - b)) * (x - b)``. Unlike ``shap.GradientExplainer`` it
+
+        - runs one forward pass per batch for **all** explained outputs, and gets all their gradients from one
+          batched backward pass (``is_grads_batched``), instead of a forward and backward per output;
+        - batches the interpolation points of **all** samples together in large chunks, instead of one sample at a
+          time in batches of 50.
+
+        :param model: Module mapping ``(B, n_features)`` to ``(B, n_outputs)``.
+        :param background: ``(n_bg, n_features)`` baseline rows.
+        :param X: ``(n, n_features)`` samples to explain.
+        :param cols: ``(n, k)`` output column explained per sample and slot; fixed per sample, so every interpolation
+            point of a sample explains the same outputs.
+        :param fam_matrix: Optional ``(k, n_out)`` 0/1 matrix summing the k slots into ``n_out`` outputs.
+        :param frozen_idx: Feature columns set to the sample's own value in every background row, so they are held
+            fixed (``x - b`` is 0 there, hence their SHAP is exactly 0).
+        :return: ``(n, n_features, n_out)`` SHAP values (``n_out = k`` without ``fam_matrix``) and the ``(n, n_out)``
+            per-sample baseline ``E_b[f(b)]`` over the drawn background rows (per sample because of the frozen
+            columns and reference pools).
+
+        Sampling is stratified: each sample cycles through its background pool (``config['reference_pools']``, one
+        index array into the background per sample; default all rows) without replacement, and its ``t`` values
+        are one per stratum of ``[0, 1]``. With ``config['split_half']`` the SHAP values of the even-numbered
+        draws are kept in ``self.split_half_shap`` (the odd half is ``2 * phi - half``) as a reliability check.
+        """
+        import torch
+
+        nsamples = int(self.config.get("gradient_nsamples", 200))
+        rng = np.random.default_rng(int(self.config.get("seed", 0)))
+        pools = self.config.get("reference_pools")
+        split_half = bool(self.config.get("split_half", False))
+        bg = torch.as_tensor(np.asarray(background, dtype="float32"))
+        X_t = torch.as_tensor(np.asarray(X, dtype="float32"))
+        cols_t = torch.as_tensor(np.ascontiguousarray(cols), dtype=torch.long)
+        fam = None if fam_matrix is None else torch.as_tensor(fam_matrix, dtype=torch.float32)
+        frozen = torch.as_tensor(list(frozen_idx), dtype=torch.long)
+        n, n_feat = X_t.shape
+        n_out = cols_t.shape[1] if fam is None else fam.shape[1]
+
+        def select(out, rows_cols):
+            out = out.gather(1, rows_cols)
+            return out if fam is None else out @ fam
+
+        # Rows per chunk: keep the (n_out, rows, n_features) gradient tensor around 64M floats
+        default_rows = max(nsamples, int(64e6 // max(n_out * n_feat, 1)) // nsamples * nsamples)
+        rows_per_chunk = int(self.config.get("gradient_batch_size", default_rows))
+        per_chunk = max(1, rows_per_chunk // nsamples)  # whole samples per chunk
+
+        phi = np.zeros((n, n_feat, n_out), dtype="float32")
+        half = np.zeros((n, n_feat, n_out), dtype="float32") if split_half else None
+        expected = np.zeros((n, n_out), dtype="float32")
+        all_rows = np.arange(len(bg))
+        batched = True
+        model.eval()
+        chunks = range(0, n, per_chunk)
+        progress = tqdm(chunks, desc="SHAP", unit="chunk", disable=not self.config.get("verbose", True) or len(chunks) == 1)
+        for start in progress:
+            idx = np.arange(start, min(start + per_chunk, n))
+            m = len(idx)
+            x_rows = X_t[idx]
+
+            # Background rows: each sample cycles through its (shuffled) pool; t: one point per stratum of [0, 1]
+            ref = np.concatenate([
+                np.resize(rng.permutation(all_rows if pools is None else np.asarray(pools[i])), nsamples) for i in idx
+            ])
+            t = (np.concatenate([rng.permutation(nsamples) for _ in idx]) + rng.random(m * nsamples)) / nsamples
+            b = bg[torch.as_tensor(ref)]
+            x = x_rows.repeat_interleave(nsamples, dim=0)
+            if len(frozen):
+                b[:, frozen] = x[:, frozen]
+            rows_cols = cols_t[idx].repeat_interleave(nsamples, dim=0)
+
+            # Baseline E_b[f(b)] per sample over its drawn rows, with the frozen columns set to the sample's values
+            with torch.no_grad():
+                expected[idx] = select(model(b), rows_cols).reshape(m, nsamples, n_out).mean(dim=1).numpy()
+
+            t = torch.as_tensor(t, dtype=torch.float32).unsqueeze(1)
+            z = (b + t * (x - b)).requires_grad_(True)
+            out = select(model(z), rows_cols)
+            grads = None
+            if batched:
+                try:
+                    eye = torch.eye(n_out).unsqueeze(1).expand(n_out, len(z), n_out)
+                    (grads,) = torch.autograd.grad(out, z, grad_outputs=eye, is_grads_batched=True)
+                except (RuntimeError, NotImplementedError):
+                    batched = False  # model not vmap-compatible: one backward per output, still one forward
+            if grads is None:
+                grads = torch.stack([
+                    torch.autograd.grad(out[:, j].sum(), z, retain_graph=j + 1 < n_out)[0] for j in range(n_out)
+                ])
+            contrib = (grads * (x - b).unsqueeze(0)).reshape(n_out, m, nsamples, n_feat).detach()
+            phi[idx] = contrib.mean(dim=2).permute(1, 2, 0).numpy()
+            if split_half:
+                half[idx] = contrib[:, :, 0::2].mean(dim=2).permute(1, 2, 0).numpy()
+        self.split_half_shap = half
+        return phi, expected
 
     def _expected_gradients_torch(self, model, background, X, cols, fam_matrix=None):
         """Batched expected gradients (the estimator behind ``shap.GradientExplainer``) for PyTorch.
@@ -451,15 +635,23 @@ class FeedForwardExplainer(ExplainerBase):
         from ai_explainability.io import to_numpy_2d
 
         if self.background_data is not None:
+            self.background_source = "background_data"
+            if self.layout is not None:
+                if isinstance(self.background_data, Mapping):
+                    return self.layout.flatten(self.background_data)
+                # Already-flat background: name it like the flattened data.
+                return to_numpy_2d(self.background_data, feature_names=self.layout.feature_names)
             return to_numpy_2d(self.background_data, feature_names=self.feature_names)
 
         bg_path = self.get_path("background_data_path")
         if bg_path:
+            self.background_source = "background_data_path"
             return to_numpy_2d(bg_path, feature_names=self.feature_names)
 
         # No explicit background — subsample the data itself.
         k = int(self.config.get("background_size", min(100, len(X))))
         if len(X) <= k:
+            self.background_source = "all explained rows"
             return X
 
         if explainer_type == "kernel":
@@ -476,10 +668,14 @@ class FeedForwardExplainer(ExplainerBase):
                         "ignore",
                         message=".*KMeans is known to have a memory leak.*",
                     )
-                    return shap.kmeans(X, k)  # DenseData summary — kernel only
+                    summary = shap.kmeans(X, k)  # DenseData summary — kernel only
+                self.background_source = f"k-means summary of the data (k={k})"
+                return summary
             except Exception:
                 pass  # fall through to a plain row sample
-        idx = np.random.RandomState(0).choice(len(X), k, replace=False)
+        seed = int(self.config.get("seed", 0))
+        self.background_source = f"random sample of the data (k={k}, seed={seed})"
+        idx = np.random.RandomState(seed).choice(len(X), k, replace=False)
         return X[idx]
 
     def _as_framework_tensor(self, arr):
@@ -538,9 +734,10 @@ class FeedForwardExplainer(ExplainerBase):
     # In-memory result view                                              #
     # ------------------------------------------------------------------ #
     def to_result(self):
+        from ai_explainability.diagnostics import annotate
         from ai_explainability.result import ExplanationResult
 
-        return ExplanationResult(
+        result = ExplanationResult(
             shap_values=dict(self.all_shap_values),
             predictions=dict(getattr(self, "all_predictions", {})),
             raw_data=self.raw_data,
@@ -548,10 +745,38 @@ class FeedForwardExplainer(ExplainerBase):
             feature_names=list(self.raw_data.columns),
             analysis="tabular",
             model_type=self.config.get("model_type", "feedforward"),
-            extras={"framework": self.framework},
+            extras={"framework": self.framework, "split_half_shap": getattr(self, "split_half_values", None)},
             chosen_index=getattr(self, "chosen_index", None),
             target_heads=getattr(self, "target_heads", None),
             target_families=getattr(self, "target_families", None),
+        )
+        if self.layout is not None:
+            # Each top-level key of a dict observation is a default group.
+            result.feature_groups = self.layout.groups
+            result.extras["dict_layout"] = self.layout
+
+        explainer_type = self.config.get("explainer_type", "kernel")
+        settings = {
+            "explainer_type": explainer_type,
+            "framework": self.framework,
+            "background": getattr(self, "background_source", None),
+            "background_size": len(self.background_values),
+            "seed": int(self.config.get("seed", 0)),
+            "n_samples_explained": len(self.raw_data_values),
+            "n_shap_runs": getattr(self, "n_groups", 1),
+            "frozen_features": list(getattr(self, "frozen_features", [])),
+        }
+        if explainer_type == "kernel":
+            settings["kernel_nsamples"] = self.config.get("kernel_nsamples", "auto")
+        elif explainer_type == "gradient":
+            settings["gradient_nsamples"] = int(self.config.get("gradient_nsamples", 200))
+            settings["reference_pools"] = self.config.get("reference_pools") is not None
+        return annotate(
+            result,
+            background=self.background_values,
+            expected_values=getattr(self, "expected_values", None),
+            settings=settings,
+            tolerance=self.config.get("additivity_tolerance"),
         )
 
     # ------------------------------------------------------------------ #
