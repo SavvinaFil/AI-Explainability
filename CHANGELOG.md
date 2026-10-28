@@ -30,6 +30,8 @@ All notable changes to this project are documented here. The format is based on
   run per group. The baseline `E[f]` is computed per sample, with the frozen
   columns of the background set to that sample's values. A progress bar runs
   over the chunks.
+  With `targets=`, each sample's choice travels with its rows, so all samples
+  run in one batched pass instead of one SHAP run per action combination.
   New config: `gradient_nsamples` (default 200, as before), `gradient_batch_size`
   (rows per chunk, default sized to ~64M gradient floats) and `seed`.
   Measured on a 45-head entity policy (887 features): 6 → 1.45 s per state on
